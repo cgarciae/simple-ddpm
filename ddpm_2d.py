@@ -182,6 +182,9 @@ class DDPM(eg.CoreModule):
     def init_step(self, key, batch):
         return self
 
+    def reset_step(self):
+        return self.replace(metrics=self.metrics.reset())
+
     @jax.jit
     def predict_step(self, batch, batch_idx):
         x_shape_source, key = batch
