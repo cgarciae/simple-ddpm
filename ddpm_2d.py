@@ -1,4 +1,20 @@
-#%%
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: -all
+#     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.14.0
+#   kernelspec:
+#     display_name: 'Python 3.8.11 (''.venv'': poetry)'
+#     language: python
+#     name: python3
+# ---
+
+# %%
 from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
@@ -19,7 +35,7 @@ class Config:
 
 config = Config()
 
-if __name__ == "__main__":
+if __name__ == "__main__" and not get_ipython():
     from ml_collections import config_flags
     from absl import flags
     import sys
@@ -29,7 +45,7 @@ if __name__ == "__main__":
     config = config_flag.value
 
 
-#%%
+# %%
 def expand_to(a, b):
     new_shape = a.shape + (1,) * (b.ndim - a.ndim)
     return a.reshape(new_shape)
@@ -62,7 +78,7 @@ class Diffusion(Pytree):
         return jnp.where(t[:, None] == 0, xT_minus1, xT_minus1 + sampling_noise)
 
 
-#%%
+# %%
 def get_data(dataset: str = "moons"):
     from sklearn.datasets import make_moons, make_blobs
     from sklearn.preprocessing import MinMaxScaler
@@ -78,7 +94,7 @@ def get_data(dataset: str = "moons"):
     return X
 
 
-#%%
+# %%
 import matplotlib.pyplot as plt
 
 
@@ -97,7 +113,7 @@ plt.figure()
 plt.scatter(X[:, 0], X[:, 1], s=1)
 draw_fn()
 
-#%%
+# %%
 num_steps = 50
 betas = jnp.linspace(0.0001, 0.01, num_steps)
 diffusion = Diffusion(betas)
@@ -110,7 +126,7 @@ for i, ti in enumerate(jnp.linspace(0, 49, 5).astype(int)):
 
 draw_fn()
 
-#%%
+# %%
 import flax.linen as nn
 from flax.training.train_state import TrainState
 import optax
@@ -230,6 +246,7 @@ history = trainer.fit(
     steps_per_epoch=config.steps_per_epoch,
 )
 
+plt.figure()
 plot_history(history)
 # %%
 def plot_trajectory(
