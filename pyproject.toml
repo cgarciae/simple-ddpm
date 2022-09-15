@@ -18,6 +18,8 @@ pre-commit = "^2.20.0"
 jupytext = "^1.14.1"
 nbconvert = "^7.0.0"
 jupyter-contrib-nbextensions = "^0.5.1"
+datasets = "^2.4.0"
+pkbar = "^0.5"
 
 [tool.poetry.dev-dependencies]
 black = {version = "^22.8.0", allow-prereleases = true}
