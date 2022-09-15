@@ -16,12 +16,12 @@
 
 # %%
 from dataclasses import dataclass
-import jax
-import jax.numpy as jnp
-from elegy.pytree import Pytree
-import elegy as eg
-import numpy as np
+from imp import reload
+from typing import List, Optional
+
 from IPython import get_ipython
+
+from ddpm_utils import update_config_from_args
 
 
 @dataclass
@@ -29,29 +29,34 @@ class Config:
     dataset: str = "moons"
     batch_size: int = 32
     epochs: int = 10
-    steps_per_epoch: int = 15_000
+    total_samples: int = 5_000_000
     lr: float = 1e-3
+    num_steps: int = 50
+    schedule_exponent: float = 2.0
+
+    @property
+    def steps_per_epoch(self) -> int:
+        return self.total_samples // (self.epochs * self.batch_size)
 
 
 config = Config()
 
-if __name__ == "__main__" and not get_ipython():
-    from ml_collections import config_flags
-    from absl import flags
-    import sys
-
-    config_flag = config_flags.DEFINE_config_dataclass("config", config)
-    flags.FLAGS(sys.argv)
-    config = config_flag.value
-
+if not get_ipython():
+    config = update_config_from_args(config)
 
 # %%
+import elegy as eg
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+
 def expand_to(a, b):
     new_shape = a.shape + (1,) * (b.ndim - a.ndim)
     return a.reshape(new_shape)
 
 
-class Diffusion(Pytree):
+class GaussianDiffusion(eg.Pytree):
     betas: jnp.ndarray
     alpha_bars: jnp.ndarray
 
@@ -60,27 +65,30 @@ class Diffusion(Pytree):
         self.alphas = 1.0 - betas
         self.alpha_bars = jnp.cumprod(self.alphas)
 
+    def get_time_index(self, t: jnp.ndarray) -> jnp.ndarray:
+        return (t / len(self.betas)).astype(jnp.int32)
+
     def forward_diffusion(self, key, x0, t):
         alpha_bars = expand_to(self.alpha_bars[t], x0)
         noise = jax.random.normal(key, x0.shape)
         xt = jnp.sqrt(alpha_bars) * x0 + jnp.sqrt(1.0 - alpha_bars) * noise
         return xt, noise
 
-    def backward_diffusion(self, key, xT, pred_noise, t):
-        betas = expand_to(self.betas[t], xT)
-        alphas = expand_to(self.alphas[t], xT)
-        alpha_bars = expand_to(self.alpha_bars[t], xT)
+    def backward_diffusion(self, key, x, pred_noise, t):
+        betas = expand_to(self.betas[t], x)
+        alphas = expand_to(self.alphas[t], x)
+        alpha_bars = expand_to(self.alpha_bars[t], x)
 
-        sampling_noise = jnp.sqrt(betas) * jax.random.normal(key, xT.shape)
+        sampling_noise = jnp.sqrt(betas) * jax.random.normal(key, x.shape)
         pred_noise = betas / jnp.sqrt(1.0 - alpha_bars) * pred_noise
-        xT_minus1 = (xT - pred_noise) / jnp.sqrt(alphas)
+        x = (x - pred_noise) / jnp.sqrt(alphas)
 
-        return jnp.where(t[:, None] == 0, xT_minus1, xT_minus1 + sampling_noise)
+        return jnp.where(t[:, None] == 0, x, x + sampling_noise)
 
 
 # %%
 def get_data(dataset: str = "moons"):
-    from sklearn.datasets import make_moons, make_blobs
+    from sklearn.datasets import make_blobs, make_moons
     from sklearn.preprocessing import MinMaxScaler
 
     if dataset == "moons":
@@ -97,39 +105,41 @@ def get_data(dataset: str = "moons"):
 # %%
 import matplotlib.pyplot as plt
 
-
-def draw_fn():
-    if not get_ipython():
-        plt.ion()
-        plt.pause(0.5)
-        plt.ioff()
-    else:
-        plt.show()
-
+from ddpm_utils import show_interactive
 
 X = get_data(config.dataset)
 
 plt.figure()
 plt.scatter(X[:, 0], X[:, 1], s=1)
-draw_fn()
+show_interactive()
 
 # %%
-num_steps = 50
-betas = jnp.linspace(0.0001, 0.01, num_steps)
-diffusion = Diffusion(betas)
+def polynomial_beta_schedule(beta_start, beta_end, timesteps, exponent=2.0):
+    betas = jnp.linspace(0, 1, timesteps) ** exponent
+    return betas * (beta_end - beta_start) + beta_start
+
+
+# %%
+betas = polynomial_beta_schedule(
+    0.0001, 0.01, config.num_steps, exponent=config.schedule_exponent
+)
+diffusion = GaussianDiffusion(betas)
 
 _, axs = plt.subplots(1, 5, figsize=(15, 3))
-for i, ti in enumerate(jnp.linspace(0, 49, 5).astype(int)):
+for i, ti in enumerate(jnp.linspace(0, config.num_steps, 5).astype(int)):
     t = jnp.full((X.shape[0],), ti)
     xt, noise = diffusion.forward_diffusion(jax.random.PRNGKey(ti), X, t)
     axs[i].scatter(xt[:, 0], xt[:, 1], s=1)
 
-draw_fn()
+show_interactive()
+
+plt.figure(figsize=(15, 6))
+plt.plot(betas)
+
+show_interactive()
 
 # %%
 import flax.linen as nn
-from flax.training.train_state import TrainState
-import optax
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -171,13 +181,25 @@ class Denoiser(nn.Module):
         return x
 
 
+# %%
+import optax
+from flax.training.train_state import TrainState
+from matplotlib.axes import Axes
+
+
+@dataclass
+class Static:
+    axes: Optional[List[Axes]] = None
+
+
 @dataclass
 class DDPM(eg.CoreModule):
-    diffusion: Diffusion
+    diffusion: GaussianDiffusion
     state: TrainState
     metrics: eg.Metrics
     key: jnp.ndarray
     steps: int = eg.static_field()
+    static: Static = eg.static_field(default_factory=lambda: Static())
 
     def init_step(self, key, batch):
         return self
@@ -187,19 +209,17 @@ class DDPM(eg.CoreModule):
 
     @jax.jit
     def predict_step(self, batch, batch_idx):
-        x_shape_source, key = batch
-        x = jax.random.uniform(key, x_shape_source.shape, minval=-1, maxval=1)
+        x0, ts, key = batch
+        keys = jax.random.split(key, len(ts))
 
-        def scan_fn(carry, t):
-            x, key = carry
-            backward_key, key = jax.random.split(key)
+        def scan_fn(x, inputs):
+            t, key = inputs
             t = jnp.full((x.shape[0],), t)
             pred_noise = self.state.apply_fn({"params": self.state.params}, x, t)
-            x = self.diffusion.backward_diffusion(backward_key, x, pred_noise, t)
-            return (x, key), x
+            x = self.diffusion.backward_diffusion(key, x, pred_noise, t)
+            return x, x
 
-        ts = jnp.arange(self.steps, 0, -1)
-        _, xs = jax.lax.scan(scan_fn, (x, key), ts)
+        _, xs = jax.lax.scan(scan_fn, x0, (ts, keys))
         return xs, self
 
     def loss_fn(self, params, key, x):
@@ -222,21 +242,31 @@ class DDPM(eg.CoreModule):
         return logs, self.replace(state=state, metrics=metrics, key=key)
 
     def on_epoch_end(self, epoch: int, logs=None):
-        x = jnp.empty((1000, 2))
-        xs, _ = self.predict_step((x, self.key), 0)
-        _, axs = plt.subplots(1, 5, figsize=(15, 3))
-        for i, ti in enumerate(jnp.linspace(0, 49, 5).astype(int)):
-            axs[i].scatter(xs[ti][:, 0], xs[ti][:, 1], s=1)
-        draw_fn()
+
+        x = jax.random.uniform(self.key, (1000, 2), minval=-1, maxval=1)
+        ts = jnp.arange(self.steps, 0, -1)
+        xs, _ = self.predict_step((x, ts, self.key), 0)
+        if self.static.axes is None:
+            _, self.static.axes = plt.subplots(1, 5, figsize=(15, 3))
+        for i, ti in enumerate(jnp.linspace(0, self.steps, 5).astype(int)):
+            self.static.axes[i].clear()
+            self.static.axes[i].scatter(xs[ti][:, 0], xs[ti][:, 1], s=1)
+        show_interactive()
         return self
 
 
-module = Denoiser()
+module = Denoiser(units=128)
 variables = module.init(jax.random.PRNGKey(42), X[:1], jnp.array([0]))
 tx = optax.adam(config.lr)
 state = TrainState.create(apply_fn=module.apply, params=variables["params"], tx=tx)
 metrics = eg.Metrics(eg.metrics.Mean(name="loss").map_arg(loss="values")).init()
-ddpm = DDPM(diffusion, state, metrics, steps=num_steps, key=jax.random.PRNGKey(42))
+ddpm = DDPM(
+    diffusion=diffusion,
+    state=state,
+    metrics=metrics,
+    steps=config.num_steps,
+    key=jax.random.PRNGKey(42),
+)
 
 # %%
 from elegy.utils import plot_history
@@ -252,101 +282,35 @@ history = trainer.fit(
 plt.figure()
 plot_history(history)
 # %%
-def plot_trajectory(
-    xs: np.ndarray,
-    interval: int = 10,
-    repeat_delay: int = 1000,
-    step_size: int = 1,
-    end_pad: int = 500,
-):
-    from pathlib import Path
-    from tempfile import TemporaryDirectory
-    from matplotlib import animation
-    from IPython import get_ipython
-    from IPython.display import HTML, display
-    from base64 import b64encode
-    from einop import einop
+import importlib
+from ddpm_utils import plot_trajectory_2d
 
-    xs = xs[::step_size]
-
-    # replace last sample to create a 'pause' effect
-    pad_end = einop(xs[-1], "... -> batch ...", batch=end_pad)
-    xs = np.concatenate([xs, pad_end], axis=0)
-
-    N = len(xs)
-
-    fig = plt.figure()
-    scatter = plt.scatter(xs[0][:, 0], xs[0][:, 1], s=1)
-
-    def animate(i):
-        scatter.set_offsets(xs[i])
-        return [scatter]
-
-    anim = animation.FuncAnimation(
-        fig,
-        animate,
-        init_func=lambda: animate(0),
-        frames=np.linspace(0, N - 1, N, dtype=int),
-        interval=interval,
-        repeat_delay=repeat_delay,
-        blit=True,
-    )
-
-    if get_ipython():
-        with TemporaryDirectory() as tmpdir:
-            img_name = Path(tmpdir) / f"diffusion.gif"
-            anim.save(str(img_name), writer="pillow", fps=60)
-            image_bytes = b64encode(img_name.read_bytes()).decode("utf-8")
-
-        display(HTML(f"""<img src='data:image/gif;base64,{image_bytes}'>"""))
-    else:
-        pass
-
-    return anim
-
-
-ddpm = trainer.module
-x = jnp.empty((1000, 2))
-xs = ddpm.predict_step((x, ddpm.key), 0)[0]
+ddpm: DDPM = trainer.module
+x = jax.random.uniform(ddpm.key, (1000, 2), minval=-1, maxval=1)
+ts = jnp.arange(config.num_steps, 0, -1)
+xs = ddpm.predict_step((x, ts, ddpm.key), 0)[0]
 
 if get_ipython():
-    anim = plot_trajectory(xs, step_size=2)
+    anim = plot_trajectory_2d(xs, step_size=2)
 else:
-    anim = plot_trajectory(xs, step_size=2, interval=100, repeat_delay=1000, end_pad=0)
+    anim = plot_trajectory_2d(
+        xs, step_size=2, interval=100, repeat_delay=1000, end_pad=0
+    )
 
 
 # %%
-def plot_density(module: DDPM, ts):
-    t = jnp.array(ts)
-    x = jnp.linspace(-1, 1, 100)
-    y = jnp.linspace(-1, 1, 100)
-    xx, yy = jnp.meshgrid(x, y)
-    X = jnp.stack([xx, yy], axis=-1)
+import ddpm_utils
 
-    def mass_fn(x, t):
-        t_ = jnp.full((1,), t)
-        x_ = x[None]
-        # pred_noise = density_gradient
-        density_gradient = module.state.apply_fn(
-            {"params": module.state.params}, x_, t_
-        )
-        magnitud = jnp.linalg.norm(density_gradient, axis=-1, keepdims=False)
-        mass = jnp.exp(-magnitud)
-        return mass[0]
+importlib.reload(ddpm_utils)
 
-    mass_fn = jax.jit(
-        jax.vmap(
-            jax.vmap(jax.vmap(mass_fn, in_axes=(0, None)), in_axes=(0, None)),
-            in_axes=(None, 0),
-            out_axes=-1,
-        )
-    )
-    mass = mass_fn(X, t).mean(axis=-1)
-    plt.contourf(xx, yy, mass, levels=100)
-
+from ddpm_utils import plot_density
 
 plt.figure()
-plot_density(ddpm, [0, 10, 20])
+plot_density(
+    model_fn=lambda x, t: ddpm.state.apply_fn({"params": ddpm.state.params}, x, t),
+    ts=jnp.array([0, 10, 20]),
+)
+show_interactive()
 
 # %%
 plt.ioff()

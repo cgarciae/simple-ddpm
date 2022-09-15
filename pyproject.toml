@@ -6,7 +6,7 @@ authors = ["Cristian Garcia <cgarcia.e88@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.8,<3.10"
-elegy = {path = "../elegy"}
+elegy = {path = "../elegy", develop = true}
 jax = "^0.3.17"
 jaxlib = "^0.3.15"
 ml-collections = "^0.1.1"
