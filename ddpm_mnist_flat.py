@@ -23,10 +23,10 @@ from IPython import get_ipython
 @dataclass
 class Config:
     batch_size: int = 32
-    epochs: int = 500
+    epochs: int = 200
     total_samples: int = 5_000_000
-    lr: float = 1e-3
-    num_steps: int = 100
+    lr: float = 3e-4
+    num_steps: int = 200
     schedule_exponent: float = 2.0
 
     @property
@@ -94,7 +94,6 @@ show_interactive()
 
 
 # %%
-
 from flax.struct import PyTreeNode
 
 

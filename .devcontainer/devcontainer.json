@@ -1,0 +1,19 @@
+{
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "runArgs": [
+        "--gpus=all",
+        "--volume=/tmp/.X11-unix:/tmp/.X11-unix",
+        "--privileged",
+    ],
+    "mounts": [],
+    "remoteEnv": {
+        "DISPLAY": ":1",
+        "QT_X11_NO_MITSHM": "1"
+    },
+    "extensions": [
+        "ms-python.python",
+        "github.copilot"
+    ]
+}

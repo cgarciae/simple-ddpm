@@ -5,8 +5,7 @@ description = ""
 authors = ["Cristian Garcia <cgarcia.e88@gmail.com>"]
 
 [tool.poetry.dependencies]
-python = "^3.8,<3.10"
-elegy = {path = "../elegy", develop = true}
+python = "^3.8,<3.11"
 jax = "^0.3.17"
 jaxlib = "^0.3.15"
 ml-collections = "^0.1.1"
@@ -20,6 +19,8 @@ nbconvert = "^7.0.0"
 jupyter-contrib-nbextensions = "^0.5.1"
 datasets = "^2.4.0"
 pkbar = "^0.5"
+jax-metrics = "^0.1.2"
+
 
 [tool.poetry.dev-dependencies]
 black = {version = "^22.8.0", allow-prereleases = true}
