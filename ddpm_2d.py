@@ -304,7 +304,7 @@ for epoch in range(config.epochs):
         _, axs = plt.subplots(1, 5, figsize=(15, 3))
     for i, ti in enumerate(jnp.linspace(0, config.num_steps, 5).astype(int)):
         axs[i].clear()
-        axs[i].scatter(xs[ti][:, 0], xs[ti][:, 1], s=1)
+        axs[i].scatter(xs[ti, :, 0], xs[ti, :, 1], s=1)
         axs[i].axis("off")
     show_interactive()
     print()  # newline
