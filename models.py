@@ -176,24 +176,6 @@ def Resize(
     return _resize
 
 
-class EMA(tp.Generic[A], PyTreeNode):
-    mu: float = field(pytree_node=False, default=0.999)
-    params: tp.Optional[A] = None
-
-    def init(self, params: A) -> "EMA":
-        return self.replace(params=params)
-
-    def update(self, new_params: A) -> "EMA":
-        if self.params is None:
-            raise ValueError("params must be initialized")
-
-        params = jax.tree_map(self._ema, self.params, new_params)
-        ema = self.replace(params=params)
-        return ema
-
-    def _ema(self, params, new_params):
-        return self.mu * params + (1.0 - self.mu) * new_params
-
 
 class UNet(nn.Module):
     dim: int

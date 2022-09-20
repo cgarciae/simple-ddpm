@@ -7,15 +7,16 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.14.0
+#       jupytext_version: 1.14.1
 #   kernelspec:
-#     display_name: 'Python 3.8.11 (''.venv'': poetry)'
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
 
 # %%
 from dataclasses import dataclass
+from typing import Any, Callable, Optional, Tuple
 
 from IPython import get_ipython
 
@@ -25,7 +26,7 @@ class Config:
     batch_size: int = 32
     epochs: int = 200
     total_samples: int = 5_000_000
-    lr: float = 3e-4
+    lr: float = 1e-3
     num_steps: int = 200
     schedule_exponent: float = 2.0
 
@@ -465,7 +466,26 @@ class Mixer2D(nn.Module):
 
 # %%
 from flax.training.train_state import TrainState
-from models import EMA
+from flax.struct import field
+
+
+class EMA(PyTreeNode):
+    mu: float = field(pytree_node=False, default=0.999)
+    params: Optional[Any] = None
+    step: Optional[jnp.ndarray] = None
+
+    def init(self, params) -> "EMA":
+        return self.replace(params=params, step=jnp.array(0, dtype=jnp.int32))
+
+    def update(self, new_params) -> Tuple[Any, "EMA"]:
+        if self.params is None or self.step is None:
+            raise ValueError("EMA must be initialized")
+
+        updates = jax.tree_map(self._ema, self.params, new_params)
+        return updates, self.replace(params=updates, step=self.step + 1)
+
+    def _ema(self, params, new_params):
+        return self.mu * params + (1.0 - self.mu) * new_params
 
 
 class State(TrainState):
@@ -478,10 +498,9 @@ class State(TrainState):
         )
 
     def apply_gradients(self, *, grads, **kwargs):
-        return super().apply_gradients(grads=grads, **kwargs)
-        # self = super().apply_gradients(grads=grads, **kwargs)
-        # ema = self.ema.update(self.params)
-        # return self.replace(params=ema.params, ema=ema)
+        self = super().apply_gradients(grads=grads, **kwargs)
+        params, ema = self.ema.update(self.params)
+        return self.replace(params=params, ema=ema)
 
 
 # %%
@@ -492,7 +511,7 @@ from models import UNet
 
 # module = SimpleUNet(units=64, emb_dim=32)
 # module = TimeConditionedMLP(2048)
-# module = SimpleCNN(64)
+module = SimpleCNN(128)
 # module = Mixer1D(
 #     patch_size=4,
 #     hidden_size=64,
@@ -502,7 +521,7 @@ from models import UNet
 #     num_steps=config.num_steps,
 # )
 # module = Mixer2D(64, 128, (1, 1), 4)
-module = UNet(dim=32, dim_mults=(1, 2, 4), channels=1)
+# module = UNet(dim=32, dim_mults=(1, 2, 4), channels=1)
 variables = module.init(jax.random.PRNGKey(42), X[:1], jnp.array([0]))
 # tx = optax.adamw(
 #     optax.linear_onecycle_schedule(
@@ -513,7 +532,7 @@ variables = module.init(jax.random.PRNGKey(42), X[:1], jnp.array([0]))
 # tx = optax.adamw(optax.linear_schedule(config.lr, config.lr / 10, config.num_steps))
 tx = optax.adamw(config.lr)
 state = State.create(
-    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(mu=0.6)
+    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(mu=0.9)
 )
 metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
 
@@ -582,6 +601,7 @@ for epoch in range(config.epochs):
         num_epochs=config.epochs,
         width=16,
         always_stateful=True,
+        verbose=2 if get_ipython() else 1,
     )
     metrics = metrics.reset()
 
@@ -589,6 +609,8 @@ for epoch in range(config.epochs):
         x = X[np.random.choice(np.arange(len(X)), config.batch_size)]
         logs, key, state, metrics = train_step(key, x, state, metrics, process)
         kbar.update(step, values=list(logs.items()))
+
+    print(logs)
 
     # --------------------
     # visualize progress
@@ -682,7 +704,6 @@ else:
     )
 
 # %%
-from typing import Any, Callable, Optional, Tuple
 
 
 def plot_density(model_fn: Callable[[Any, Any], Any], ts):
