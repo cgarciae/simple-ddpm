@@ -1,15 +1,10 @@
-import dataclasses
 import typing as tp
-from functools import partial
-from inspect import isfunction
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-import treeo as to
 from einop import einop
-from flax.struct import PyTreeNode, field
 
 A = tp.TypeVar("A")
 M = tp.TypeVar("M", bound="nn.Module")
@@ -19,7 +14,7 @@ ArrayFn = tp.Callable[[jnp.ndarray], jnp.ndarray]
 def default(val, d):
     if val is not None:
         return val
-    return d() if isfunction(d) else d
+    return d() if callable(d) else d
 
 
 def conv_padding(*args: int) -> tp.List[tp.Tuple[int, int]]:
@@ -46,11 +41,11 @@ class SinusoidalEmb(nn.Module):
 
 
 def Upsample(dim: int):
-    return nn.ConvTranspose(dim, [4, 4], strides=[2, 2], padding=conv_padding(2, 2))
+    return nn.ConvTranspose(dim, (4, 4), strides=(2, 2), padding=conv_padding(2, 2))
 
 
 def Downsample(dim: int):
-    return nn.Conv(dim, [4, 4], strides=[2, 2], padding=conv_padding(1, 1))
+    return nn.Conv(dim, (4, 4), strides=(2, 2), padding=conv_padding(1, 1))
 
 
 class PreNorm(nn.Module):
