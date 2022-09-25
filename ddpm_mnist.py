@@ -368,7 +368,7 @@ def loss_fn(params, xt, t, noise):
         raise ValueError(f"Unknown loss type {config.loss_type}")
 
 
-@jax.jit
+@partial(jax.jit, donate_argnums=(2, 3))
 def train_step(key, x, state, metrics, process):
     key_t, key_diffusion, key = jax.random.split(key, 3)
     t = jax.random.uniform(
