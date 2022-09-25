@@ -15,14 +15,13 @@
 # ---
 
 # %%
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from os import stat
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 import jax
+import wandb
 
 from IPython import get_ipython
-
-print(jax.devices())
 
 
 @dataclass
@@ -35,7 +34,9 @@ class Config:
     schedule_exponent: float = 2.0
     loss_type: str = "mae"
     dataset: str = "mnist"
-    time_per_epoch: float = 10 * 60.0
+    time_per_epoch: float = 2 * 60
+    viz: str = "matplotlib"
+    model: str = "stable_unet"
 
     @property
     def steps_per_epoch(self) -> int:
@@ -48,8 +49,6 @@ class Config:
 
 config = Config()
 
-# %%
-
 if not get_ipython():
     import sys
 
@@ -60,9 +59,16 @@ if not get_ipython():
     flags.FLAGS(sys.argv)
     config = config_flag.value
 
+if config.viz == "wandb":
+    wandb.init(project=f"ddpm-{config.dataset}", config=asdict(config))
 
-def show_interactive():
-    if not get_ipython():
+print(jax.devices())
+
+# %%
+def show_interactive(name: str):
+    if config.viz == "wandb":
+        wandb.log({name: plt})
+    elif not get_ipython():
         plt.ion()
         plt.pause(1)
         plt.ioff()
@@ -140,7 +146,7 @@ _, axs_diffusion = plt.subplots(2, 4, figsize=(12, 6))
 for col, ax in enumerate(axs_diffusion.flatten()):
     render_image(x_sample[col], ax=ax)
 
-show_interactive()
+show_interactive("samples")
 
 
 # %%
@@ -215,7 +221,7 @@ plt.plot(betas)
 for s in ["top", "bottom", "left", "right"]:
     plt.gca().spines[s].set_visible(False)
 
-show_interactive()
+show_interactive("betas_schedule")
 
 
 # %%
@@ -267,45 +273,54 @@ from models.simple_unet import SimpleUNet
 from models.mlp_mixer import MLPMixer
 from models.unet_stable import UNet2DModule, UNet2DConfig
 
-# module = SimpleUNet(units=64, emb_dim=32)
-# module = SimpleCNN(128)
-# module = MLPMixer(
-#     patch_size=4,
-#     hidden_size=64,
-#     mix_patch_size=512,
-#     mix_hidden_size=512,
-#     num_blocks=4,
-#     num_steps=config.timesteps,
-# )
-# module = Mixer2D(64, 128, (1, 1), 4)
-module = UNet2DModule(
-    UNet2DConfig(
-        out_channels=num_channels,
-        down_block_types=(
-            "DownBlock2D",
-            "DownBlock2D",
-            "DownBlock2D",
-            "CrossAttnDownBlock2D",
-        ),
-        up_block_types=(
-            "CrossAttnUpBlock2D",
-            "DownBlock2D",
-            "UpBlock2D",
-            "UpBlock2D",
-        ),
-        block_out_channels=(
-            128,
-            128,
-            128,
-            128,
-        ),
-        cross_attention_dim=128,
+if config.model == "simple_unet":
+    module = SimpleUNet(units=64, emb_dim=32)
+elif config.model == "simple_cnn":
+    module = SimpleCNN(128)
+elif config.model == "mlp_mixer":
+    module = MLPMixer(
+        patch_size=4,
+        hidden_size=64,
+        mix_patch_size=512,
+        mix_hidden_size=512,
+        num_blocks=4,
+        num_steps=config.timesteps,
     )
-)
-# module = UNet(dim=64, dim_mults=(1, 2, 4), channels=num_channels)
+elif config.model == "mlp_mixer_2d":
+    module = Mixer2D(64, 128, (1, 1), 4)
+elif config.model == "stable_unet":
+    module = UNet2DModule(
+        UNet2DConfig(
+            out_channels=num_channels,
+            down_block_types=(
+                "DownBlock2D",
+                "DownBlock2D",
+                "DownBlock2D",
+                "CrossAttnDownBlock2D",
+            ),
+            up_block_types=(
+                "CrossAttnUpBlock2D",
+                "DownBlock2D",
+                "UpBlock2D",
+                "UpBlock2D",
+            ),
+            block_out_channels=(
+                128,
+                128,
+                128,
+                128,
+            ),
+            cross_attention_dim=128,
+        )
+    )
+elif config.model == "lucid_unet":
+    module = UNet(dim=64, dim_mults=(1, 2, 4), channels=num_channels)
+else:
+    raise ValueError(f"Unknown model: '{config.model}'")
+
 variables = module.init(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]))
 tx = optax.chain(
-    # optax.clip_by_global_norm(1.0),
+    optax.clip_by_global_norm(1.0),
     optax.adamw(
         optax.piecewise_constant_schedule(
             config.lr,
@@ -336,18 +351,18 @@ def reverse_diffusion(process, key, x, noise_hat, t):
     z = jnp.where(
         expand_to(t, x) > 0, jax.random.normal(key, x.shape), jnp.zeros_like(x)
     )
-    scaled_noise = betas / jnp.sqrt(1.0 - alpha_bars) * noise_hat
-    x = (x - scaled_noise) / jnp.sqrt(alphas) + jnp.sqrt(betas) * z
+    noise_scaled = betas / jnp.sqrt(1.0 - alpha_bars) * noise_hat
+    x = (x - noise_scaled) / jnp.sqrt(alphas) + jnp.sqrt(betas) * z
     return x
 
 
 @partial(jax.jit, static_argnames=["return_all"])
 def sample(key, x0, ts, state, process, *, return_all=True):
     keys = jax.random.split(key, len(ts))
+    ts = einop(ts, "t -> t b", b=x0.shape[0])
 
     def scan_fn(x, inputs):
         t, key = inputs
-        t = jnp.full((x.shape[0],), t)
         noise_hat = state.apply_fn({"params": state.params}, x, t)
         x = reverse_diffusion(process, key, x, noise_hat, t)
         out = x if return_all else None
@@ -368,8 +383,9 @@ def loss_fn(params, xt, t, noise):
         raise ValueError(f"Unknown loss type {config.loss_type}")
 
 
-@partial(jax.jit, donate_argnums=(2, 3))
+@jax.jit
 def train_step(key, x, state, metrics, process):
+    print("JITTING train_step")
     key_t, key_diffusion, key = jax.random.split(key, 3)
     t = jax.random.uniform(
         key_t, (x.shape[0],), minval=0, maxval=config.timesteps - 1
@@ -391,17 +407,41 @@ from time import time
 
 
 class Timer:
-    def __init__(self, period: float):
+    def __init__(self, period: float, deltas: Dict[float, float] = {}):
         self.period = period
+        self.deltas = list(deltas.items())
         self.t0 = None
+        self.time_start = None
 
     def is_ready(self):
         t = time()
-        if self.t0 is None or t - self.t0 > self.period:
+        if self.t0 is None or self.time_start is None:
+            self.t0 = t
+            self.time_start = t
+            return True
+
+        elapsed = t - self.t0
+        if elapsed > self.period:
+            if len(self.deltas) > 0:
+                total_elapsed = t - self.time_start
+                update_time, new_period = self.deltas[0]
+                if total_elapsed > update_time:
+                    self.deltas.pop(0)
+                    self.period = new_period
             self.t0 = t
             return True
         else:
             return False
+
+
+def log_metrics(logs, step):
+    if logs is None:
+        return
+
+    if config.viz == "wandb":
+        wandb.log(logs, step=step)
+
+    print(f"step: {step}," + ", ".join(f"{k}: {v:.4f}" for k, v in logs.items()))
 
 
 print(jax.devices())
@@ -410,7 +450,7 @@ key = jax.random.PRNGKey(42)
 axs_diffusion = None
 axs_samples = None
 ds_iterator = ds.as_numpy_iterator()
-epoch_timer = Timer(config.time_per_epoch)
+epoch_timer = Timer(config.time_per_epoch, {600: 600})
 logs = None
 
 for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step"):
@@ -420,10 +460,10 @@ for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step
         # visualize progress
         # --------------------
         print()  # newline
-        print(f"step: {step}", logs)
+        log_metrics(logs, step)
         n_rows = 3
         n_cols = 7
-        viz_key = jax.random.PRNGKey(0)
+        viz_key = jax.random.PRNGKey(1)
         x = jax.random.normal(viz_key, (n_rows, *x_sample.shape[1:]))
 
         ts = jnp.arange(config.timesteps)[::-1]
@@ -439,7 +479,7 @@ for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step
         axs_diffusion.clear()
         render_image(xs, axs_diffusion)
         axs_diffusion.axis("off")
-        show_interactive()
+        show_interactive("training_samples")
         # ------------------------
         # reset epoch
         # ------------------------
@@ -464,7 +504,7 @@ xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 plt.figure(figsize=(3 * n_cols, 3 * n_rows))
 render_image(xf)
 plt.axis("off")
-show_interactive()
+show_interactive("final_samples")
 
 
 # %%

@@ -21,6 +21,7 @@ datasets = "^2.4.0"
 pkbar = "^0.5"
 jax-metrics = "^0.1.2"
 tensorflow-cpu = "^2.10.0"
+wandb = "^0.13.3"
 
 
 [tool.poetry.dev-dependencies]
