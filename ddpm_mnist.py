@@ -17,9 +17,11 @@
 # %%
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple
+import jax
 
 from IPython import get_ipython
 
+print(jax.devices())
 
 @dataclass
 class Config:
@@ -27,9 +29,11 @@ class Config:
     epochs: int = 500
     total_samples: int = 5_000_000
     lr: float = 1e-3
-    num_steps: int = 1000
+    timesteps: int = 1000
     schedule_exponent: float = 2.0
     loss_type: str = "mae"
+    dataset: str = "mnist"
+    time_per_epoch: float = 120.0
 
     @property
     def steps_per_epoch(self) -> int:
@@ -71,34 +75,68 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from datasets.load import load_dataset
+import tensorflow as tf
 
 
-def get_data():
-    ds = load_dataset("mnist", split="train")
-    X = np.stack(ds["image"])[..., None]
-    return X / 127.5 - 1.0
+def get_data(dataset: str, batch_size: int):
+    if dataset == "mnist":
+        hfds = load_dataset("mnist", split="train")
+        X = np.stack(hfds["image"])[..., None]
+        ds = tf.data.Dataset.from_tensor_slices(X.astype(np.float32))
+    elif dataset == "cartoonset":
+        hfds = load_dataset("cgarciae/cartoonset", "10k", split="train")
+        ds = tf.data.Dataset.from_generator(
+            lambda: hfds,
+            output_signature={
+                "img_bytes": tf.TensorSpec(shape=(), dtype=tf.string),
+            },
+        )
+
+        def process_fn(x):
+            x = tf.image.decode_png(x["img_bytes"], channels=3)
+            # x = tf.image.convert_image_dtype(x, tf.float32)
+            x = tf.cast(x, tf.float32)
+            x = tf.image.resize(x, (64 + 16, 64 + 16))
+            return x
+
+        ds = ds.map(process_fn)
+    else:
+        raise ValueError(f"Unknown dataset {dataset}")
+
+    # scale betwee -1 and 1
+    ds = ds.map(lambda x: x / 127.5 - 1.0)
+    ds = ds.repeat()
+    ds = ds.shuffle(seed=42, buffer_size=1_000)
+    ds = ds.batch(batch_size, drop_remainder=True)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+
+    return ds
 
 
-X = get_data()
+ds = get_data("cartoonset", config.batch_size)
 
 # %%
-
-
 def render_image(x, ax=None):
     if ax is None:
         ax = plt.gca()
 
-    x = (x[..., 0] / 2.0 + 0.5) * 255
-    # x = np.clip(x, 0, 255).astype(np.uint8)
+    if x.shape[-1] == 1:
+        x = x[..., 0]
+        cmap = "gray"
+    else:
+        cmap = None
+    x = (x / 2.0 + 0.5) * 255
+    x = np.clip(x, 0, 255).astype(np.uint8)
     # ax.imshow(255 - x, cmap="gray")
-    ax.imshow(x, cmap="gray")
+    ax.imshow(x, cmap=cmap)
     ax.axis("off")
 
 
-x = X[np.random.choice(len(X), 8)]
+x_sample = ds.as_numpy_iterator().next()
+num_channels = x_sample.shape[-1]
 _, axs_diffusion = plt.subplots(2, 4, figsize=(12, 6))
 for i, ax in enumerate(axs_diffusion.flatten()):
-    render_image(x[i], ax=ax)
+    render_image(x_sample[i], ax=ax)
 
 show_interactive()
 
@@ -156,21 +194,20 @@ def cosine_schedule(beta_start, beta_end, timesteps, s=0.008, **kwargs):
 
 
 # %%
-# betas = cosine_schedule(0.001, 0.5, config.num_steps, exponent=config.schedule_exponent)
-betas = polynomial_schedule(1e-5, 1e-2, config.num_steps, exponent=2)
+betas = cosine_schedule(1e-5, 0.5, config.timesteps, exponent=config.schedule_exponent)
+# betas = polynomial_schedule(1e-5, 1e-2, config.timesteps, exponent=2)
 process = GaussianDiffusion.create(betas)
 
-x = X[:1]
 plt.figure(figsize=(15, 6))
-for i, ti in enumerate(jnp.linspace(0, config.num_steps, 5).astype(int)):
-    t = jnp.full((x.shape[0],), ti)
-    xt, noise = forward_diffusion(process, jax.random.PRNGKey(ti), x, t)
+for i, ti in enumerate(jnp.linspace(0, config.timesteps, 5).astype(int)):
+    t = jnp.full((1,), ti)
+    xt, noise = forward_diffusion(process, jax.random.PRNGKey(ti), x_sample[:1], t)
     ax = plt.subplot(2, 5, i + 1)
     render_image(xt[i], ax=ax)
     plt.axis("off")
 
 plt.subplot(2, 1, 2)
-linear = polynomial_schedule(betas.min(), betas.max(), config.num_steps, exponent=1.0)
+linear = polynomial_schedule(betas.min(), betas.max(), config.timesteps, exponent=1.0)
 plt.plot(linear, label="linear", color="black", linestyle="dotted")
 plt.plot(betas)
 for s in ["top", "bottom", "left", "right"]:
@@ -236,34 +273,37 @@ from models.unet_stable import UNet2DModule, UNet2DConfig
 #     mix_patch_size=512,
 #     mix_hidden_size=512,
 #     num_blocks=4,
-#     num_steps=config.num_steps,
+#     num_steps=config.timesteps,
 # )
 # module = Mixer2D(64, 128, (1, 1), 4)
-# module = UNet2DModule(
-#     UNet2DConfig(
-#         out_channels=1,
-#         down_block_types=(
-#             "CrossAttnDownBlock2D",
-#             "CrossAttnDownBlock2D",
-#             "DownBlock2D",
-#         ),
-#         up_block_types=(
-#             "UpBlock2D",
-#             "CrossAttnUpBlock2D",
-#             "CrossAttnUpBlock2D",
-#         ),
-#         block_out_channels=(
-#             224,
-#             448,
-#             672,
-#         ),
-#         cross_attention_dim=768,
-#     )
-# )
-module = UNet(dim=32, dim_mults=(1, 2, 4), channels=1)
-variables = module.init(jax.random.PRNGKey(42), X[:1], jnp.array([0]))
+module = UNet2DModule(
+    UNet2DConfig(
+        out_channels=num_channels,
+        down_block_types=(
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "CrossAttnDownBlock2D",
+        ),
+        up_block_types=(
+            "CrossAttnUpBlock2D",
+            "DownBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        ),
+        block_out_channels=(
+            128,
+            128,
+            128,
+            128,
+        ),
+        cross_attention_dim=128,
+    )
+)
+# module = UNet(dim=64, dim_mults=(1, 2, 4), channels=num_channels)
+variables = module.init(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]))
 tx = optax.chain(
-    optax.clip_by_global_norm(1.0),
+    # optax.clip_by_global_norm(1.0),
     optax.adamw(
         optax.piecewise_constant_schedule(
             config.lr,
@@ -279,7 +319,7 @@ state = State.create(
 )
 metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
 
-print(module.tabulate(jax.random.PRNGKey(42), X[:1], jnp.array([0]), depth=1))
+print(module.tabulate(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]), depth=1))
 
 # %%
 @jax.jit
@@ -326,7 +366,7 @@ def loss_fn(params, xt, t, noise):
 def train_step(key, x, state, metrics, process):
     key_t, key_diffusion, key = jax.random.split(key, 3)
     t = jax.random.uniform(
-        key_t, (x.shape[0],), minval=0, maxval=config.num_steps - 1
+        key_t, (x.shape[0],), minval=0, maxval=config.timesteps - 1
     ).astype(jnp.int32)
     xt, noise = forward_diffusion(process, key_diffusion, x, t)
     loss, grads = jax.value_and_grad(loss_fn)(state.params, xt, t, noise)
@@ -341,49 +381,67 @@ import numpy as np
 from pkbar import Kbar
 from einop import einop
 from tqdm import tqdm
+from time import time
+
+
+class Timer:
+    def __init__(self, period: float):
+        self.period = period
+        self.t0 = None
+
+    def is_ready(self):
+        t = time()
+        if self.t0 is None or t - self.t0 > self.period:
+            self.t0 = t
+            return True
+        else:
+            return False
+
+
+print(jax.devices())
 
 key = jax.random.PRNGKey(42)
 axs_diffusion = None
 axs_samples = None
-bar = tqdm(total=config.total_steps, unit="step")
+ds_iterator = ds.as_numpy_iterator()
+epoch_timer = Timer(config.time_per_epoch)
+logs = None
 
-for epoch in range(config.epochs):
-    # --------------------
-    # visualize progress
-    # --------------------
-    n_rows = 3
-    n_cols = 7
-    viz_key = jax.random.PRNGKey(0)
-    x = jax.random.normal(viz_key, (n_rows, *X.shape[1:]))
 
-    ts = jnp.arange(config.num_steps)[::-1]
-    xs = sample(viz_key, x, ts, state, process)
-    xs = np.concatenate([x[None], xs], axis=0)
+for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step"):
 
-    if axs_diffusion is None or get_ipython():
-        _, axs_diffusion = plt.subplots(
-            n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows)
-        )
-    for r, ax_row in enumerate(axs_diffusion):
-        for i, ti in enumerate(jnp.linspace(0, len(xs) - 1, n_cols).astype(int)):
-            ax_row[i].clear()
-            render_image(xs[ti, r], ax_row[i])
-            ax_row[i].axis("off")
-    show_interactive()
-    print()  # newline
+    if epoch_timer.is_ready():
+        # --------------------
+        # visualize progress
+        # --------------------
+        print()  # newline
+        print(f"step: {step}", logs)
+        n_rows = 3
+        n_cols = 7
+        viz_key = jax.random.PRNGKey(0)
+        x = jax.random.normal(viz_key, (n_rows, *x_sample.shape[1:]))
 
-    # --------------------
-    # train
-    # --------------------
+        ts = jnp.arange(config.timesteps)[::-1]
+        xs = sample(viz_key, x, ts, state, process)
+        xs = np.concatenate([x[None], xs], axis=0)
 
-    metrics = metrics.reset()
+        if axs_diffusion is None or get_ipython():
+            _, axs_diffusion = plt.subplots(
+                n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows)
+            )
+        for r, ax_row in enumerate(axs_diffusion):
+            for i, ti in enumerate(jnp.linspace(0, len(xs) - 1, n_cols).astype(int)):
+                ax_row[i].clear()
+                render_image(xs[ti, r], ax_row[i])
+                ax_row[i].axis("off")
+        show_interactive()
+        # ------------------------
+        # reset epoch
+        # ------------------------
+        metrics = metrics.reset()
 
-    for step in range(config.steps_per_epoch):
-        x = X[np.random.choice(np.arange(len(X)), config.batch_size)]
-        logs, key, state, metrics = train_step(key, x, state, metrics, process)
-        bar.update()
-
-    print(logs)
+    x = ds_iterator.next()
+    logs, key, state, metrics = train_step(key, x, state, metrics, process)
 
 
 # %%
@@ -445,7 +503,7 @@ def plot_trajectory_2d(
 # %%
 
 x = jax.random.normal(key, (1000, 2), minval=-1, maxval=1)
-ts = jnp.arange(config.num_steps)[::-1]
+ts = jnp.arange(config.timesteps)[::-1]
 xs = sample(key, x, ts, state, process)
 
 if get_ipython():
