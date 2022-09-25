@@ -16,12 +16,14 @@
 
 # %%
 from dataclasses import dataclass
+from os import stat
 from typing import Any, Callable, Optional, Tuple
 import jax
 
 from IPython import get_ipython
 
 print(jax.devices())
+
 
 @dataclass
 class Config:
@@ -33,7 +35,7 @@ class Config:
     schedule_exponent: float = 2.0
     loss_type: str = "mae"
     dataset: str = "mnist"
-    time_per_epoch: float = 120.0
+    time_per_epoch: float = 10 * 60.0
 
     @property
     def steps_per_epoch(self) -> int:
@@ -135,8 +137,8 @@ def render_image(x, ax=None):
 x_sample = ds.as_numpy_iterator().next()
 num_channels = x_sample.shape[-1]
 _, axs_diffusion = plt.subplots(2, 4, figsize=(12, 6))
-for i, ax in enumerate(axs_diffusion.flatten()):
-    render_image(x_sample[i], ax=ax)
+for col, ax in enumerate(axs_diffusion.flatten()):
+    render_image(x_sample[col], ax=ax)
 
 show_interactive()
 
@@ -199,11 +201,11 @@ betas = cosine_schedule(1e-5, 0.5, config.timesteps, exponent=config.schedule_ex
 process = GaussianDiffusion.create(betas)
 
 plt.figure(figsize=(15, 6))
-for i, ti in enumerate(jnp.linspace(0, config.timesteps, 5).astype(int)):
+for col, ti in enumerate(jnp.linspace(0, config.timesteps, 5).astype(int)):
     t = jnp.full((1,), ti)
     xt, noise = forward_diffusion(process, jax.random.PRNGKey(ti), x_sample[:1], t)
-    ax = plt.subplot(2, 5, i + 1)
-    render_image(xt[i], ax=ax)
+    ax = plt.subplot(2, 5, col + 1)
+    render_image(xt[col], ax=ax)
     plt.axis("off")
 
 plt.subplot(2, 1, 2)
@@ -322,6 +324,9 @@ metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
 print(module.tabulate(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]), depth=1))
 
 # %%
+from functools import partial
+
+
 @jax.jit
 def reverse_diffusion(process, key, x, noise_hat, t):
     betas = expand_to(process.betas[t], x)
@@ -336,8 +341,8 @@ def reverse_diffusion(process, key, x, noise_hat, t):
     return x
 
 
-@jax.jit
-def sample(key, x0, ts, state, process):
+@partial(jax.jit, static_argnames=["return_all"])
+def sample(key, x0, ts, state, process, *, return_all=True):
     keys = jax.random.split(key, len(ts))
 
     def scan_fn(x, inputs):
@@ -345,10 +350,11 @@ def sample(key, x0, ts, state, process):
         t = jnp.full((x.shape[0],), t)
         noise_hat = state.apply_fn({"params": state.params}, x, t)
         x = reverse_diffusion(process, key, x, noise_hat, t)
-        return x, x
+        out = x if return_all else None
+        return x, out
 
-    _, xs = jax.lax.scan(scan_fn, x0, (ts, keys))
-    return xs
+    x, xs = jax.lax.scan(scan_fn, x0, (ts, keys))
+    return xs if return_all else x
 
 
 # %%
@@ -407,7 +413,6 @@ ds_iterator = ds.as_numpy_iterator()
 epoch_timer = Timer(config.time_per_epoch)
 logs = None
 
-
 for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step"):
 
     if epoch_timer.is_ready():
@@ -422,18 +427,18 @@ for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step
         x = jax.random.normal(viz_key, (n_rows, *x_sample.shape[1:]))
 
         ts = jnp.arange(config.timesteps)[::-1]
-        xs = sample(viz_key, x, ts, state, process)
-        xs = np.concatenate([x[None], xs], axis=0)
+        xs = np.asarray(sample(viz_key, x, ts, state, process))
+        # xs = np.concatenate([x[None], xs], axis=0)
+        xs = xs[np.linspace(0, len(xs) - 1, n_cols).astype(int)]
+        xs = einop(xs, "col row h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 
         if axs_diffusion is None or get_ipython():
-            _, axs_diffusion = plt.subplots(
-                n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows)
-            )
-        for r, ax_row in enumerate(axs_diffusion):
-            for i, ti in enumerate(jnp.linspace(0, len(xs) - 1, n_cols).astype(int)):
-                ax_row[i].clear()
-                render_image(xs[ti, r], ax_row[i])
-                ax_row[i].axis("off")
+            plt.figure(figsize=(3 * n_cols, 3 * n_rows))
+            axs_diffusion = plt.gca()
+
+        axs_diffusion.clear()
+        render_image(xs, axs_diffusion)
+        axs_diffusion.axis("off")
         show_interactive()
         # ------------------------
         # reset epoch
@@ -442,6 +447,24 @@ for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step
 
     x = ds_iterator.next()
     logs, key, state, metrics = train_step(key, x, state, metrics, process)
+
+
+# %%
+from einop import einop
+
+n_rows = 4
+n_cols = 5
+viz_key = jax.random.PRNGKey(1)
+x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
+
+ts = jnp.arange(config.timesteps)[::-1]
+xf = np.asarray(sample(viz_key, x, ts, state, process, return_all=False))
+xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
+
+plt.figure(figsize=(3 * n_cols, 3 * n_rows))
+render_image(xf)
+plt.axis("off")
+show_interactive()
 
 
 # %%
