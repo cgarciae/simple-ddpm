@@ -263,7 +263,7 @@ from flax.training.train_state import TrainState
 
 
 class EMA(PyTreeNode):
-    mu: float = field(pytree_node=False, default=0.999)
+    decay: float = field(pytree_node=False, default=0.999)
     params: Optional[Any] = None
 
     def init(self, params) -> "EMA":
@@ -273,11 +273,11 @@ class EMA(PyTreeNode):
         if self.params is None:
             raise ValueError("EMA must be initialized")
 
-        updates = jax.tree_map(self._ema, self.params, new_params)
-        return updates, self.replace(params=updates)
+        ema_params = jax.tree_map(self._ema, self.params, new_params)
+        return ema_params, self.replace(params=ema_params)
 
-    def _ema(self, params, new_params):
-        return self.mu * new_params + (1.0 - self.mu) * params
+    def _ema(self, ema_params, new_params):
+        return (1.0 - self.decay) * (ema_params - new_params)
 
 
 class State(TrainState):
@@ -364,7 +364,7 @@ tx = optax.chain(
     ),
 )
 state = State.create(
-    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(mu=0.1)
+    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(decay=0.9)
 )
 metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
 
