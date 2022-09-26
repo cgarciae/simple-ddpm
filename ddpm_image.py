@@ -41,6 +41,7 @@ class Config:
     viz: str = "matplotlib"
     model: str = "stable_unet"
     log_every: int = 200
+    ema_decay: float = 0.9
 
     @property
     def steps_per_epoch(self) -> int:
@@ -277,7 +278,7 @@ class EMA(PyTreeNode):
         return ema_params, self.replace(params=ema_params)
 
     def _ema(self, ema_params, new_params):
-        return (1.0 - self.decay) * (ema_params - new_params)
+        return self.decay * ema_params + (1.0 - self.decay) * new_params
 
 
 class State(TrainState):
@@ -364,7 +365,7 @@ tx = optax.chain(
     ),
 )
 state = State.create(
-    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(decay=0.9)
+    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(decay=config.ema_decay)
 )
 metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
 
