@@ -38,7 +38,6 @@ class Config:
     schedule_exponent: float = 2.0
     loss_type: str = "mae"
     dataset: str = "cartoonset"
-    time_per_epoch: float = 2  # minutes
     viz: str = "matplotlib"
     model: str = "stable_unet"
     log_every: int = 200
@@ -66,17 +65,17 @@ if config.viz == "wandb":
         save_code=True,
     )
 
-    # from gitignore_parser import parse_gitignore
+    from gitignore_parser import parse_gitignore
 
-    # ignored = parse_gitignore(".gitignore")
+    ignored = parse_gitignore(".gitignore")
 
-    # def include_fn(path: str) -> bool:
-    #     try:
-    #         return not ignored(path)
-    #     except:
-    #         return False
+    def include_fn(path: str) -> bool:
+        try:
+            return not ignored(path) and "_files" not in path
+        except:
+            return False
 
-    # run.log_code(include_fn=include_fn)
+    run.log_code(include_fn=include_fn)
 
 
 print(jax.devices())
@@ -130,7 +129,7 @@ def get_data(dataset: str, batch_size: int):
             x = tf.image.decode_png(x["img_bytes"], channels=3)
             # x = tf.image.convert_image_dtype(x, tf.float32)
             x = tf.cast(x, tf.float32)
-            x = tf.image.resize(x, (64 + 16, 64 + 16))
+            x = tf.image.resize(x, (128, 128))
             return x
 
         ds = ds.map(process_fn)
@@ -266,20 +265,19 @@ from flax.training.train_state import TrainState
 class EMA(PyTreeNode):
     mu: float = field(pytree_node=False, default=0.999)
     params: Optional[Any] = None
-    step: Optional[jnp.ndarray] = None
 
     def init(self, params) -> "EMA":
-        return self.replace(params=params, step=jnp.array(0, dtype=jnp.int32))
+        return self.replace(params=params)
 
     def update(self, new_params) -> Tuple[Any, "EMA"]:
-        if self.params is None or self.step is None:
+        if self.params is None:
             raise ValueError("EMA must be initialized")
 
         updates = jax.tree_map(self._ema, self.params, new_params)
-        return updates, self.replace(params=updates, step=self.step + 1)
+        return updates, self.replace(params=updates)
 
     def _ema(self, params, new_params):
-        return self.mu * params + (1.0 - self.mu) * new_params
+        return self.mu * new_params + (1.0 - self.mu) * params
 
 
 class State(TrainState):
@@ -334,17 +332,17 @@ elif config.model == "stable_unet":
             ),
             up_block_types=(
                 "CrossAttnUpBlock2D",
-                "DownBlock2D",
+                "UpBlock2D",
                 "UpBlock2D",
                 "UpBlock2D",
             ),
             block_out_channels=(
                 128,
                 128,
-                128,
-                128,
+                256,
+                256,
             ),
-            cross_attention_dim=128,
+            cross_attention_dim=256,
         )
     )
 elif config.model == "lucid_unet":
@@ -366,7 +364,7 @@ tx = optax.chain(
     ),
 )
 state = State.create(
-    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(mu=0.9)
+    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(mu=0.1)
 )
 metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
 
@@ -392,6 +390,7 @@ def reverse_diffusion(process, key, x, noise_hat, t):
 
 @partial(jax.jit, static_argnames=["return_all"])
 def sample(key, x0, ts, state, process, *, return_all=True):
+    print("JITTING sample")
     keys = jax.random.split(key, len(ts))
     ts = einop(ts, "t -> t b", b=x0.shape[0])
 
@@ -438,28 +437,23 @@ from time import time
 
 
 class Timer:
-    def __init__(self, period: float, deltas: Dict[float, float] = {}):
-        self.period = period * 60
-        self.deltas = [(a * 60, b * 60) for a, b in deltas.items()]
-        self.t0 = None
-        self.time_start = None
+    def __init__(self, steps_until_eval: float, deltas: Dict[float, float] = {}):
+        self.steps_until_eval = steps_until_eval
+        self.deltas = list(deltas.items())
+        self._last_eval_step: Optional[int] = None
 
-    def is_ready(self):
-        t = time()
-        if self.t0 is None or self.time_start is None:
-            self.t0 = t
-            self.time_start = t
+    def is_ready(self, step: int) -> bool:
+        if self._last_eval_step is None:
+            self._last_eval_step = step
             return True
-
-        elapsed = t - self.t0
-        if elapsed > self.period:
+        elapsed = step - self._last_eval_step
+        if elapsed >= self.steps_until_eval:
             if len(self.deltas) > 0:
-                total_elapsed = t - self.time_start
-                update_time, new_period = self.deltas[0]
-                if total_elapsed > update_time:
+                update_time, steps_until_eval = self.deltas[0]
+                if step >= update_time:
                     self.deltas.pop(0)
-                    self.period = new_period
-            self.t0 = t
+                    self.steps_until_eval = steps_until_eval
+            self._last_eval_step = step
             return True
         else:
             return False
@@ -485,20 +479,18 @@ key = jax.random.PRNGKey(42)
 axs_diffusion = None
 axs_samples = None
 ds_iterator = ds.as_numpy_iterator()
-epoch_timer = Timer(config.time_per_epoch, {20: 10})
+epoch_timer = Timer(500, {10_000: 1000, 70_000: 5000})
 logs = {}
 
 for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step"):
 
-    if epoch_timer.is_ready():
+    if epoch_timer.is_ready(step):
         # --------------------
         # visualize progress
         # --------------------
-        print()  # newline
-        log_metrics(logs, step)
-
-        n_rows = 4
-        n_cols = 7
+        print("Sampling...")
+        n_rows = 3
+        n_cols = 5
         viz_key = jax.random.PRNGKey(1)
         x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
 
@@ -513,21 +505,22 @@ for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step
         axs_diffusion.clear()
         render_image(xf, ax=axs_diffusion)
         show_interactive("training_samples", step=step)
-        # ------------------------
-        # reset epoch
-        # ------------------------
-        metrics = metrics.reset()
 
     if step % config.log_every == 0:
+        print()  # newline
         log_metrics(logs, step)
+        metrics = metrics.reset()
 
+    # --------------------
+    # trainig step
+    # --------------------
     x = ds_iterator.next()
     logs, key, state, metrics = train_step(key, x, state, metrics, process)
 
 
 # %%
-n_rows = 4
-n_cols = 7
+n_rows = 3
+n_cols = 5
 viz_key = jax.random.PRNGKey(1)
 x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
 
