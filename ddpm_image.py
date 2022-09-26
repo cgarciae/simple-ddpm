@@ -15,13 +15,17 @@
 # ---
 
 # %%
-from dataclasses import dataclass, asdict
+
+import sys
+from dataclasses import asdict, dataclass
 from os import stat
 from typing import Any, Callable, Dict, Optional, Tuple
-import jax
-import wandb
 
+import jax
+from absl import flags
 from IPython import get_ipython
+from ml_collections import config_flags
+import wandb
 
 
 @dataclass
@@ -33,10 +37,11 @@ class Config:
     timesteps: int = 1000
     schedule_exponent: float = 2.0
     loss_type: str = "mae"
-    dataset: str = "mnist"
-    time_per_epoch: float = 2 * 60
+    dataset: str = "cartoonset"
+    time_per_epoch: float = 2  # minutes
     viz: str = "matplotlib"
     model: str = "stable_unet"
+    log_every: int = 200
 
     @property
     def steps_per_epoch(self) -> int:
@@ -50,24 +55,36 @@ class Config:
 config = Config()
 
 if not get_ipython():
-    import sys
-
-    from absl import flags
-    from ml_collections import config_flags
-
     config_flag = config_flags.DEFINE_config_dataclass("config", config)
     flags.FLAGS(sys.argv)
     config = config_flag.value
 
 if config.viz == "wandb":
-    wandb.init(project=f"ddpm-{config.dataset}", config=asdict(config))
+    run = wandb.init(
+        project=f"ddpm-{config.dataset}",
+        config=asdict(config),
+        save_code=True,
+    )
+
+    # from gitignore_parser import parse_gitignore
+
+    # ignored = parse_gitignore(".gitignore")
+
+    # def include_fn(path: str) -> bool:
+    #     try:
+    #         return not ignored(path)
+    #     except:
+    #         return False
+
+    # run.log_code(include_fn=include_fn)
+
 
 print(jax.devices())
 
 # %%
-def show_interactive(name: str):
+def show_interactive(name: str, step: int = 0):
     if config.viz == "wandb":
-        wandb.log({name: plt})
+        wandb.log({name: plt}, step=step)
     elif not get_ipython():
         plt.ion()
         plt.pause(1)
@@ -82,14 +99,23 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-from datasets.load import load_dataset
 import tensorflow as tf
+from datasets.load import load_dataset
 
 
 def get_data(dataset: str, batch_size: int):
     if dataset == "mnist":
         hfds = load_dataset("mnist", split="train")
         X = np.stack(hfds["image"])[..., None]
+        ds = tf.data.Dataset.from_tensor_slices(X.astype(np.float32))
+    elif dataset == "pokemon":
+        hfds = load_dataset("lambdalabs/pokemon-blip-captions", split="train")
+        hfds = hfds.map(
+            lambda sample: {"image": sample["image"].resize((64 + 16, 64 + 16))},
+            remove_columns=["text"],
+            batch_size=96,
+        )
+        X = np.stack(hfds["image"])
         ds = tf.data.Dataset.from_tensor_slices(X.astype(np.float32))
     elif dataset == "cartoonset":
         hfds = load_dataset("cgarciae/cartoonset", "10k", split="train")
@@ -111,7 +137,6 @@ def get_data(dataset: str, batch_size: int):
     else:
         raise ValueError(f"Unknown dataset {dataset}")
 
-    # scale betwee -1 and 1
     ds = ds.map(lambda x: x / 127.5 - 1.0)
     ds = ds.repeat()
     ds = ds.shuffle(seed=42, buffer_size=1_000)
@@ -121,9 +146,12 @@ def get_data(dataset: str, batch_size: int):
     return ds
 
 
-ds = get_data("cartoonset", config.batch_size)
+ds = get_data(config.dataset, config.batch_size)
 
 # %%
+from einop import einop
+
+
 def render_image(x, ax=None):
     if ax is None:
         ax = plt.gca()
@@ -142,9 +170,13 @@ def render_image(x, ax=None):
 
 x_sample = ds.as_numpy_iterator().next()
 num_channels = x_sample.shape[-1]
-_, axs_diffusion = plt.subplots(2, 4, figsize=(12, 6))
-for col, ax in enumerate(axs_diffusion.flatten()):
-    render_image(x_sample[col], ax=ax)
+
+n_rows = 4
+n_cols = 7
+x = x_sample[: n_rows * n_cols]
+plt.figure(figsize=(3 * n_cols, 3 * n_rows))
+x = einop(x, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
+render_image(x)
 
 show_interactive("samples")
 
@@ -205,28 +237,30 @@ def cosine_schedule(beta_start, beta_end, timesteps, s=0.008, **kwargs):
 betas = cosine_schedule(1e-5, 0.5, config.timesteps, exponent=config.schedule_exponent)
 # betas = polynomial_schedule(1e-5, 1e-2, config.timesteps, exponent=2)
 process = GaussianDiffusion.create(betas)
+n_rows = 2
+n_cols = 7
 
-plt.figure(figsize=(15, 6))
-for col, ti in enumerate(jnp.linspace(0, config.timesteps, 5).astype(int)):
-    t = jnp.full((1,), ti)
-    xt, noise = forward_diffusion(process, jax.random.PRNGKey(ti), x_sample[:1], t)
-    ax = plt.subplot(2, 5, col + 1)
-    render_image(xt[col], ax=ax)
-    plt.axis("off")
+_, (ax_img, ax_plot) = plt.subplots(2, 1, figsize=(3 * n_cols, 3 * n_rows))
 
-plt.subplot(2, 1, 2)
+t = jnp.linspace(0, config.timesteps, n_cols).astype(int)
+x = einop(x_sample[0], "h w c -> b h w c", b=n_cols)
+x, _ = forward_diffusion(process, jax.random.PRNGKey(0), x, t)
+x = einop(x, "col h w c -> h (col w) c", col=n_cols)
+render_image(x, ax=ax_img)
+
 linear = polynomial_schedule(betas.min(), betas.max(), config.timesteps, exponent=1.0)
-plt.plot(linear, label="linear", color="black", linestyle="dotted")
-plt.plot(betas)
+ax_plot.plot(linear, label="linear", color="black", linestyle="dotted")
+ax_plot.plot(betas)
 for s in ["top", "bottom", "left", "right"]:
-    plt.gca().spines[s].set_visible(False)
+    ax_plot.spines[s].set_visible(False)
 
 show_interactive("betas_schedule")
 
 
+from flax.struct import field
+
 # %%
 from flax.training.train_state import TrainState
-from flax.struct import field
 
 
 class EMA(PyTreeNode):
@@ -265,13 +299,13 @@ class State(TrainState):
 
 # %%
 import optax
-
 from jax_metrics.metrics import Mean, Metrics
-from models.unet_lucid import UNet
+
+from models.mlp_mixer import MLPMixer
 from models.simple_cnn import SimpleCNN
 from models.simple_unet import SimpleUNet
-from models.mlp_mixer import MLPMixer
-from models.unet_stable import UNet2DModule, UNet2DConfig
+from models.unet_lucid import UNet
+from models.unet_stable import UNet2DConfig, UNet2DModule
 
 if config.model == "simple_unet":
     module = SimpleUNet(units=64, emb_dim=32)
@@ -399,17 +433,14 @@ def train_step(key, x, state, metrics, process):
 
 
 # %%
-import numpy as np
-from pkbar import Kbar
-from einop import einop
-from tqdm import tqdm
+
 from time import time
 
 
 class Timer:
     def __init__(self, period: float, deltas: Dict[float, float] = {}):
-        self.period = period
-        self.deltas = list(deltas.items())
+        self.period = period * 60
+        self.deltas = [(a * 60, b * 60) for a, b in deltas.items()]
         self.t0 = None
         self.time_start = None
 
@@ -441,8 +472,12 @@ def log_metrics(logs, step):
     if config.viz == "wandb":
         wandb.log(logs, step=step)
 
-    print(f"step: {step}," + ", ".join(f"{k}: {v:.4f}" for k, v in logs.items()))
+    print(f"step: {step}, " + ", ".join(f"{k}: {v:.4f}" for k, v in logs.items()))
 
+
+# %%
+import numpy as np
+from tqdm import tqdm
 
 print(jax.devices())
 
@@ -450,8 +485,8 @@ key = jax.random.PRNGKey(42)
 axs_diffusion = None
 axs_samples = None
 ds_iterator = ds.as_numpy_iterator()
-epoch_timer = Timer(config.time_per_epoch, {600: 600})
-logs = None
+epoch_timer = Timer(config.time_per_epoch, {20: 10})
+logs = {}
 
 for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step"):
 
@@ -461,49 +496,47 @@ for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step
         # --------------------
         print()  # newline
         log_metrics(logs, step)
-        n_rows = 3
+
+        n_rows = 4
         n_cols = 7
         viz_key = jax.random.PRNGKey(1)
-        x = jax.random.normal(viz_key, (n_rows, *x_sample.shape[1:]))
+        x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
 
-        ts = jnp.arange(config.timesteps)[::-1]
-        xs = np.asarray(sample(viz_key, x, ts, state, process))
-        # xs = np.concatenate([x[None], xs], axis=0)
-        xs = xs[np.linspace(0, len(xs) - 1, n_cols).astype(int)]
-        xs = einop(xs, "col row h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
+        ts = np.arange(config.timesteps)[::-1]
+        xf = np.asarray(sample(viz_key, x, ts, state, process, return_all=False))
+        xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 
-        if axs_diffusion is None or get_ipython():
+        if axs_diffusion is None or get_ipython() or config.viz == "wandb":
             plt.figure(figsize=(3 * n_cols, 3 * n_rows))
             axs_diffusion = plt.gca()
 
         axs_diffusion.clear()
-        render_image(xs, axs_diffusion)
-        axs_diffusion.axis("off")
-        show_interactive("training_samples")
+        render_image(xf, ax=axs_diffusion)
+        show_interactive("training_samples", step=step)
         # ------------------------
         # reset epoch
         # ------------------------
         metrics = metrics.reset()
+
+    if step % config.log_every == 0:
+        log_metrics(logs, step)
 
     x = ds_iterator.next()
     logs, key, state, metrics = train_step(key, x, state, metrics, process)
 
 
 # %%
-from einop import einop
-
 n_rows = 4
-n_cols = 5
+n_cols = 7
 viz_key = jax.random.PRNGKey(1)
 x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
 
-ts = jnp.arange(config.timesteps)[::-1]
+ts = np.arange(config.timesteps)[::-1]
 xf = np.asarray(sample(viz_key, x, ts, state, process, return_all=False))
 xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 
 plt.figure(figsize=(3 * n_cols, 3 * n_rows))
 render_image(xf)
-plt.axis("off")
 show_interactive("final_samples")
 
 
@@ -565,7 +598,7 @@ def plot_trajectory_2d(
 
 # %%
 
-x = jax.random.normal(key, (1000, 2), minval=-1, maxval=1)
+x = jax.random.normal(key, (1000, 2))
 ts = jnp.arange(config.timesteps)[::-1]
 xs = sample(key, x, ts, state, process)
 

@@ -593,6 +593,14 @@ python-versions = ">=3.6"
 smmap = ">=3.0.1,<6"
 
 [[package]]
+name = "gitignore-parser"
+version = "0.1.0"
+description = "A spec-compliant gitignore parser for Python 3.5+"
+category = "main"
+optional = false
+python-versions = "*"
+
+[[package]]
 name = "GitPython"
 version = "3.1.27"
 description = "GitPython is a python library used to interact with Git repositories"
@@ -2416,7 +2424,7 @@ testing = ["func-timeout", "jaraco.itertools", "pytest (>=6)", "pytest-black (>=
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.8,<3.11"
-content-hash = "19a7bd29bf53810259bb389c0b50480d7fc3dabacee213720d63c8b28c8eb1cc"
+content-hash = "ed2138d78b952decba4212ed9eefdc7657fa92db4ea81330aac100e92f372974"
 
 [metadata.files]
 absl-py = [
@@ -2871,6 +2879,9 @@ gast = [
 gitdb = [
     {file = "gitdb-4.0.9-py3-none-any.whl", hash = "sha256:8033ad4e853066ba6ca92050b9df2f89301b8fc8bf7e9324d412a63f8bf1a8fd"},
     {file = "gitdb-4.0.9.tar.gz", hash = "sha256:bac2fd45c0a1c9cf619e63a90d62bdc63892ef92387424b855792a6cabe789aa"},
+]
+gitignore-parser = [
+    {file = "gitignore_parser-0.1.0.tar.gz", hash = "sha256:7efe2677dd433b784c3f28c7246478e6ff442e22ff56d54eb6b9e9cec96e873c"},
 ]
 GitPython = [
     {file = "GitPython-3.1.27-py3-none-any.whl", hash = "sha256:5b68b000463593e05ff2b261acff0ff0972df8ab1b70d3cdbd41b546c8b8fc3d"},
