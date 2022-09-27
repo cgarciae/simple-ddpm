@@ -400,9 +400,10 @@ state = State.create(
     params=variables["params"],
     tx=tx,
     ema=EMA.create(
-        decay=piecewise_constant_schedule(
-            config.initial_ema_decay, {2_000: 0.9, 10_000: 0.99}
-        )
+        decay=config.initial_ema_decay
+        # decay=piecewise_constant_schedule(
+        #     config.initial_ema_decay, {10_000: 0.5, 10_000: 0.99}
+        # )
     ),
 )
 metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
