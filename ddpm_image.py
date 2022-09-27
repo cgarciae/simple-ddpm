@@ -33,7 +33,7 @@ class Config:
     batch_size: int = 32
     epochs: int = 500
     total_samples: int = 5_000_000
-    lr: float = 1e-3
+    lr: float = 3e-4
     timesteps: int = 1000
     schedule_exponent: float = 2.0
     loss_type: str = "mae"
@@ -41,7 +41,7 @@ class Config:
     viz: str = "matplotlib"
     model: str = "stable_unet"
     log_every: int = 200
-    ema_decay: float = 0.9
+    initial_ema_decay: float = 0.0
 
     @property
     def steps_per_epoch(self) -> int:
@@ -261,11 +261,22 @@ from flax.struct import field
 
 # %%
 from flax.training.train_state import TrainState
+from typing import Callable, Union
 
 
 class EMA(PyTreeNode):
-    decay: float = field(pytree_node=False, default=0.999)
-    params: Optional[Any] = None
+    decay_fn: Callable[[jnp.ndarray], jnp.ndarray] = field(pytree_node=False)
+    params: Optional[Any]
+    step: jnp.ndarray
+
+    @classmethod
+    def create(cls, decay: Union[float, Callable[[jnp.ndarray], jnp.ndarray]]):
+        if isinstance(decay, (float, int, np.ndarray, jnp.ndarray)):
+            decay_fn = lambda _: jnp.asarray(decay, dtype=jnp.float32)
+        else:
+            decay_fn = decay
+
+        return cls(decay_fn=decay_fn, params=None, step=jnp.array(0, dtype=jnp.int32))
 
     def init(self, params) -> "EMA":
         return self.replace(params=params)
@@ -275,10 +286,11 @@ class EMA(PyTreeNode):
             raise ValueError("EMA must be initialized")
 
         ema_params = jax.tree_map(self._ema, self.params, new_params)
-        return ema_params, self.replace(params=ema_params)
+        return ema_params, self.replace(params=ema_params, step=self.step + 1)
 
     def _ema(self, ema_params, new_params):
-        return self.decay * ema_params + (1.0 - self.decay) * new_params
+        decay = self.decay_fn(self.step)
+        return decay * ema_params + (1.0 - decay) * new_params
 
 
 class State(TrainState):
@@ -294,6 +306,25 @@ class State(TrainState):
         self = super().apply_gradients(grads=grads, **kwargs)
         params, ema = self.ema.update(self.params)
         return self.replace(params=params, ema=ema)
+
+
+def piecewise_constant_schedule(
+    init_value: float, boundaries_and_values: Optional[Dict[int, float]] = None
+):
+    if boundaries_and_values is None:
+        boundaries_and_values = {}
+
+    boundaries_and_values_ = sorted(boundaries_and_values.items())
+    boundaries = jnp.array([b for b, _ in boundaries_and_values_], dtype=jnp.int32)
+    values = jnp.array(
+        [init_value] + [v for _, v in boundaries_and_values_], dtype=jnp.float32
+    )
+
+    def schedule(step):
+        index = jnp.sum(step >= boundaries)
+        return values[index]
+
+    return schedule
 
 
 # %%
@@ -358,14 +389,21 @@ tx = optax.chain(
         optax.piecewise_constant_schedule(
             config.lr,
             {
-                int(config.total_steps / 3): 0.1,
-                int(config.total_steps * 2 / 3): 0.1,
+                int(config.total_steps / 3): 1 / 3,
+                int(config.total_steps * 2 / 3): 3 / 10,
             },
         )
     ),
 )
 state = State.create(
-    apply_fn=module.apply, params=variables["params"], tx=tx, ema=EMA(decay=config.ema_decay)
+    apply_fn=module.apply,
+    params=variables["params"],
+    tx=tx,
+    ema=EMA.create(
+        decay=piecewise_constant_schedule(
+            config.initial_ema_decay, {2_000: 0.9, 10_000: 0.99}
+        )
+    ),
 )
 metrics = Metrics(Mean(name="loss").map_arg(loss="values")).init()
 
