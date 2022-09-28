@@ -68,15 +68,15 @@ class EMA(Generic[A], PyTreeNode):
         if step <= self.update_after_step:
             ema_params = new_params
         elif step % self.update_every == 0:
-            ema_params = self._ema_update(new_params)
+            ema_params = self._ema_update(step, new_params)
         else:
             ema_params = self.params
 
         return self.replace(params=ema_params)
 
     @jax.jit
-    def _ema_update(self, new_params):
-        decay = self.decay_fn(self.step)
+    def _ema_update(self, step, new_params):
+        decay = self.decay_fn(step)
 
         def _ema(ema_params, new_params):
             return decay * ema_params + (1.0 - decay) * new_params
