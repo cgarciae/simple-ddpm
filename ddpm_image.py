@@ -29,7 +29,7 @@ class Config:
     batch_size: int = 32
     epochs: int = 500
     total_samples: int = 5_000_000
-    lr: float = 2e-4
+    lr: float = 1e-4
     timesteps: int = 1000
     schedule_exponent: float = 2.0
     loss_type: str = "mae"
