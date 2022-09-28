@@ -39,8 +39,8 @@ C = TypeVar("C", bound=Config)
 
 
 class EMA(Generic[A], PyTreeNode):
-    decay_fn: Callable[[jnp.ndarray], jnp.ndarray] = field(pytree_node=False)
     params: A
+    decay_fn: Callable[[jnp.ndarray], jnp.ndarray] = field(pytree_node=False)
     update_after_step: int = field(pytree_node=False)
     update_every: int = field(pytree_node=False)
 
@@ -58,8 +58,8 @@ class EMA(Generic[A], PyTreeNode):
             decay_fn = decay
 
         return cls(
-            decay_fn=decay_fn,
             params=params,
+            decay_fn=decay_fn,
             update_after_step=update_after_step,
             update_every=update_every,
         )
