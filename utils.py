@@ -40,8 +40,7 @@ C = TypeVar("C", bound=Config)
 
 class EMA(Generic[A], PyTreeNode):
     decay_fn: Callable[[jnp.ndarray], jnp.ndarray] = field(pytree_node=False)
-    params: Optional[A]
-    step: jnp.ndarray
+    params: A
     update_after_step: int = field(pytree_node=False)
     update_every: int = field(pytree_node=False)
 
@@ -61,32 +60,28 @@ class EMA(Generic[A], PyTreeNode):
         return cls(
             decay_fn=decay_fn,
             params=params,
-            step=jnp.array(0, dtype=jnp.int32),
             update_after_step=update_after_step,
             update_every=update_every,
         )
 
-    def update(self, new_params) -> "EMA":
-        if self.params is None:
-            raise ValueError("EMA must be initialized")
+    def update(self, step: int, new_params) -> "EMA":
+        if step <= self.update_after_step:
+            ema_params = new_params
+        elif step % self.update_every == 0:
+            ema_params = self._ema_update(new_params)
+        else:
+            ema_params = self.params
 
-        no_op = lambda ema_p, p: ema_p
-        ema_update = lambda ema_p, p: jax.tree_map(self._ema, ema_p, p)
-        select_incoming = lambda ema_p, p: p
+        return self.replace(params=ema_params)
 
-        ema_params = switch_case(
-            [
-                (self.step <= self.update_after_step, select_incoming),
-                (self.step % self.update_every == 0, ema_update),
-            ],
-            otherwise=no_op,
-        )(self.params, new_params)
-
-        return self.replace(params=ema_params, step=self.step + 1)
-
-    def _ema(self, ema_params, new_params):
+    @jax.jit
+    def _ema_update(self, new_params):
         decay = self.decay_fn(self.step)
-        return decay * ema_params + (1.0 - decay) * new_params
+
+        def _ema(ema_params, new_params):
+            return decay * ema_params + (1.0 - decay) * new_params
+
+        return jax.tree_map(_ema, self.params, new_params)
 
 
 def setup_config(config_class: Type[C]) -> C:

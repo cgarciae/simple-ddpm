@@ -221,9 +221,8 @@ class TrainState(train_state.TrainState):
             apply_fn=apply_fn, params=params, tx=tx, ema=ema, **kwargs
         )
 
-    def update(self, *, grads, **kwargs):
-        self = self.apply_gradients(grads=grads, **kwargs)
-        ema = self.ema.update(self.params)
+    def ema_update(self, step: int) -> "TrainState":
+        ema = self.ema.update(step, self.params)
         return self.replace(ema=ema)
 
 
@@ -280,7 +279,7 @@ tx = optax.chain(
         )
     ),
 )
-state = TrainState.create(
+state: TrainState = TrainState.create(
     apply_fn=module.apply,
     params=variables["params"],
     tx=tx,
@@ -360,7 +359,7 @@ def train_step(key, x, state: TrainState, metrics: Metrics, process: GaussianDif
     xt, noise = forward_diffusion(process, key_diffusion, x, t)
     loss, grads = jax.value_and_grad(loss_fn)(state.params, xt, t, noise)
     ema_loss = loss_fn(state.ema.params, xt, t, noise)
-    state = state.update(grads=grads)
+    state = state.apply_gradients(grads=grads)
     metrics = metrics.update(loss=loss, ema_loss=ema_loss)
     logs = metrics.compute()
     return logs, key, state, metrics
@@ -379,8 +378,13 @@ axs_diffusion = None
 axs_samples = None
 ds_iterator = ds.as_numpy_iterator()
 logs = {}
+step = 0
 
-for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step"):
+# %%
+
+for step in tqdm(
+    range(step, config.total_steps), total=config.total_steps, unit="step"
+):
 
     if step % config.eval_every == 0:
         # --------------------
@@ -416,6 +420,7 @@ for step in tqdm(range(config.total_steps), total=config.total_steps, unit="step
     # --------------------
     x = ds_iterator.next()
     logs, key, state, metrics = train_step(key, x, state, metrics, process)
+    state = state.ema_update(step)
 
 
 # %%
