@@ -182,7 +182,7 @@ def cosine_schedule(beta_start, beta_end, timesteps, s=0.008, **kwargs):
 # TODO: create a plot for each schedule
 
 # %%
-betas = cosine_schedule(1e-5, 0.5, config.timesteps, exponent=config.schedule_exponent)
+betas = cosine_schedule(3e-4, 0.5, config.timesteps, exponent=config.schedule_exponent)
 # betas = polynomial_schedule(1e-5, 1e-2, config.timesteps, exponent=2)
 process = GaussianDiffusion.create(betas)
 n_rows = 2
