@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 from typing_extensions import Protocol
 from flax.struct import PyTreeNode, field
+from flax import traverse_util
 
 
 class Config(Protocol):
@@ -99,7 +100,10 @@ def setup_config(config_class: Type[C]) -> C:
     if config.viz == "wandb":
         run = wandb.init(
             project=f"ddpm-{config.dataset}",
-            config=asdict(config),
+            config={
+                ".".join(p): v
+                for p, v in traverse_util.flatten_dict(asdict(config)).items()
+            },
             save_code=True,
         )
 

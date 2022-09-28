@@ -25,22 +25,35 @@ import utils
 
 
 @dataclass
+class EMAConfig:
+    decay: float = 0.995
+    update_every: int = 10
+    update_after_step: int = 100
+
+
+@dataclass
+class DiffusionConfig:
+    schedule: str = "cosine"
+    beta_start: float = 3e-4
+    beta_end: float = 0.5
+    timesteps: int = 1_000
+
+
+@dataclass
 class Config:
     batch_size: int = 32
     epochs: int = 500
     total_samples: int = 5_000_000
     lr: float = 1e-4
-    timesteps: int = 1000
-    schedule_exponent: float = 2.0
     loss_type: str = "mae"
     dataset: str = "cartoonset"
     viz: str = "matplotlib"
     model: str = "stable_unet"
     eval_every: int = 2000
     log_every: int = 200
-    ema_decay: float = 0.995
-    ema_update_every: int = 10
-    ema_update_after_step: int = 100
+    ema: EMAConfig = EMAConfig()
+    schedule: DiffusionConfig = DiffusionConfig()
+    diffusion: DiffusionConfig = DiffusionConfig()
 
     @property
     def steps_per_epoch(self) -> int:
@@ -182,21 +195,33 @@ def cosine_schedule(beta_start, beta_end, timesteps, s=0.008, **kwargs):
 # TODO: create a plot for each schedule
 
 # %%
-betas = cosine_schedule(3e-4, 0.5, config.timesteps, exponent=config.schedule_exponent)
-# betas = polynomial_schedule(1e-5, 1e-2, config.timesteps, exponent=2)
+if config.diffusion.schedule == "polynomial":
+    schedule = polynomial_schedule
+elif config.diffusion.schedule == "sigmoid":
+    schedule = sigmoid_schedule
+elif config.diffusion.schedule == "cosine":
+    schedule = cosine_schedule
+else:
+    raise ValueError(f"Unknown schedule {config.diffusion.schedule}")
+
+betas = schedule(
+    config.diffusion.beta_start, config.diffusion.beta_end, config.diffusion.timesteps
+)
 process = GaussianDiffusion.create(betas)
 n_rows = 2
 n_cols = 7
 
 _, (ax_img, ax_plot) = plt.subplots(2, 1, figsize=(3 * n_cols, 3 * n_rows))
 
-t = jnp.linspace(0, config.timesteps, n_cols).astype(int)
+t = jnp.linspace(0, config.diffusion.timesteps, n_cols).astype(int)
 x = einop(x_sample[0], "h w c -> b h w c", b=n_cols)
 x, _ = forward_diffusion(process, jax.random.PRNGKey(0), x, t)
 x = einop(x, "col h w c -> h (col w) c", col=n_cols)
 render_image(x, ax=ax_img)
 
-linear = polynomial_schedule(betas.min(), betas.max(), config.timesteps, exponent=1.0)
+linear = polynomial_schedule(
+    betas.min(), betas.max(), config.diffusion.timesteps, exponent=1.0
+)
 ax_plot.plot(linear, label="linear", color="black", linestyle="dotted")
 ax_plot.plot(betas)
 for s in ["top", "bottom", "left", "right"]:
@@ -285,9 +310,9 @@ state: TrainState = TrainState.create(
     tx=tx,
     ema=EMA.create(
         params=variables["params"],
-        decay=config.ema_decay,
-        update_every=config.ema_update_every,
-        update_after_step=config.ema_update_after_step,
+        decay=config.ema.decay,
+        update_every=config.ema.update_every,
+        update_after_step=config.ema.update_after_step,
     ),
 )
 metrics = Metrics(
@@ -354,7 +379,7 @@ def train_step(key, x, state: TrainState, metrics: Metrics, process: GaussianDif
     print("compiling 'train_step' ...")
     key_t, key_diffusion, key = jax.random.split(key, 3)
     t = jax.random.uniform(
-        key_t, (x.shape[0],), minval=0, maxval=config.timesteps - 1
+        key_t, (x.shape[0],), minval=0, maxval=config.diffusion.timesteps - 1
     ).astype(jnp.int32)
     xt, noise = forward_diffusion(process, key_diffusion, x, t)
     loss, grads = jax.value_and_grad(loss_fn)(state.params, xt, t, noise)
@@ -396,7 +421,7 @@ for step in tqdm(
         viz_key = jax.random.PRNGKey(1)
         x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
 
-        ts = np.arange(config.timesteps)[::-1]
+        ts = np.arange(config.diffusion.timesteps)[::-1]
         xf = np.asarray(
             sample(viz_key, x, ts, state.ema.params, process, return_all=False)
         )
@@ -429,7 +454,7 @@ n_cols = 5
 viz_key = jax.random.PRNGKey(1)
 x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
 
-ts = np.arange(config.timesteps)[::-1]
+ts = np.arange(config.diffusion.timesteps)[::-1]
 xf = np.asarray(sample(viz_key, x, ts, state.ema.params, process, return_all=False))
 xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 
