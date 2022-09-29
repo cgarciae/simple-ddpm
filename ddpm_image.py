@@ -44,7 +44,7 @@ class Config:
     batch_size: int = 32
     epochs: int = 500
     total_samples: int = 5_000_000
-    lr: float = 1e-4
+    lr: float = 5e-5
     loss_type: str = "mae"
     dataset: str = "cartoonset"
     viz: str = "matplotlib"
