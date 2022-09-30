@@ -23,6 +23,7 @@ from IPython import get_ipython
 
 import utils
 
+print(jax.devices())
 
 @dataclass
 class EMAConfig:
@@ -71,7 +72,7 @@ class Config:
 
 config = utils.setup_config(Config)
 
-print(jax.devices())
+
 
 
 # %%
