@@ -34,26 +34,32 @@ class EMAConfig:
 @dataclass
 class DiffusionConfig:
     schedule: str = "cosine"
-    beta_start: float = 3e-4
-    beta_end: float = 0.5
+    beta_start: float = 1e-5
+    beta_end: float = 0.01
     timesteps: int = 1_000
+
+
+@dataclass
+class ModelConfig:
+    units: int = 128
+    emb_dim: int = 32
 
 
 @dataclass
 class Config:
     batch_size: int = 32
-    epochs: int = 500
-    total_samples: int = 5_000_000
-    lr: float = 5e-5
+    epochs: int = 10
+    total_samples: int = 2_000_000
+    lr: float = 1e-3
     loss_type: str = "mae"
-    dataset: str = "cartoonset"
+    dataset: str = "moons"
     viz: str = "matplotlib"
-    model: str = "stable_unet"
     eval_every: int = 2000
     log_every: int = 200
     ema: EMAConfig = EMAConfig()
     schedule: DiffusionConfig = DiffusionConfig()
     diffusion: DiffusionConfig = DiffusionConfig()
+    model: ModelConfig = ModelConfig()
 
     @property
     def steps_per_epoch(self) -> int:
@@ -71,76 +77,44 @@ print(jax.devices())
 
 # %%
 
-import jax
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import numpy as np
+from sklearn.datasets import make_blobs, make_moons
+from sklearn.preprocessing import MinMaxScaler
+from utils import show
 import tensorflow as tf
-from datasets.load import load_dataset
+import numpy as np
 
 
-def get_data(dataset: str, batch_size: int):
-    if dataset == "mnist":
-        hfds = load_dataset("mnist", split="train")
-        X = np.stack(hfds["image"])[..., None]
-        ds = tf.data.Dataset.from_tensor_slices(X.astype(np.float32))
-    elif dataset == "pokemon":
-        hfds = load_dataset("lambdalabs/pokemon-blip-captions", split="train")
-        hfds = hfds.map(
-            lambda sample: {"image": sample["image"].resize((64 + 16, 64 + 16))},
-            remove_columns=["text"],
-            batch_size=96,
-        )
-        X = np.stack(hfds["image"])
-        ds = tf.data.Dataset.from_tensor_slices(X.astype(np.float32))
-    elif dataset == "cartoonset":
-        hfds = load_dataset("cgarciae/cartoonset", "10k", split="train")
-        ds = tf.data.Dataset.from_generator(
-            lambda: hfds,
-            output_signature={
-                "img_bytes": tf.TensorSpec(shape=(), dtype=tf.string),
-            },
-        )
-
-        def process_fn(x):
-            x = tf.image.decode_png(x["img_bytes"], channels=3)
-            x = tf.cast(x, tf.float32)
-            x = tf.image.resize(x, (128, 128))
-            return x
-
-        ds = ds.map(process_fn)
+def get_data(config: Config):
+    if config.dataset == "moons":
+        X, y = make_moons(n_samples=1000, noise=0.1, random_state=0)
+    elif config.dataset == "blobs":
+        X = make_blobs(n_samples=1000, centers=6, cluster_std=0.5, random_state=6)[0]
     else:
-        raise ValueError(f"Unknown dataset {dataset}")
+        raise ValueError(f"Unknown dataset: {config.dataset}")
 
-    ds = ds.map(lambda x: x / 127.5 - 1.0)
+    X = MinMaxScaler((-1, 1)).fit_transform(X)
+    ds = tf.data.Dataset.from_tensor_slices(X.astype(np.float32))
     ds = ds.repeat()
     ds = ds.shuffle(seed=42, buffer_size=1_000)
-    ds = ds.batch(batch_size, drop_remainder=True)
+    ds = ds.batch(config.batch_size, drop_remainder=True)
     ds = ds.prefetch(tf.data.AUTOTUNE)
 
-    return ds
+    return X, ds
 
-
-ds = get_data(config.dataset, config.batch_size)
 
 # %%
-from einop import einop
 
-from utils import render_image, show
+X, ds = get_data(config)
 
-x_sample = ds.as_numpy_iterator().next()
-num_channels = x_sample.shape[-1]
-
-n_rows = 4
-n_cols = 7
-x = x_sample[: n_rows * n_cols]
-plt.figure(figsize=(3 * n_cols, 3 * n_rows))
-x = einop(x, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
-render_image(x)
+plt.figure()
+plt.scatter(X[:, 0], X[:, 1], s=1)
 show("samples")
 
 
 # %%
+import jax
+import jax.numpy as jnp
 from flax.struct import PyTreeNode
 
 
@@ -211,21 +185,22 @@ process = GaussianDiffusion.create(betas)
 n_rows = 2
 n_cols = 7
 
-_, (ax_img, ax_plot) = plt.subplots(2, 1, figsize=(3 * n_cols, 3 * n_rows))
+plt.figure(figsize=(n_cols * 3, n_rows * 3))
+for i, ti in enumerate(jnp.linspace(0, config.diffusion.timesteps, n_cols).astype(int)):
+    t = jnp.full((X.shape[0],), ti)
+    xt, noise = forward_diffusion(process, jax.random.PRNGKey(ti), X, t)
+    plt.subplot(n_rows, n_cols, i + 1)
+    plt.scatter(xt[:, 0], xt[:, 1], s=1)
+    plt.axis("off")
 
-t = jnp.linspace(0, config.diffusion.timesteps, n_cols).astype(int)
-x = einop(x_sample[0], "h w c -> b h w c", b=n_cols)
-x, _ = forward_diffusion(process, jax.random.PRNGKey(0), x, t)
-x = einop(x, "col h w c -> h (col w) c", col=n_cols)
-render_image(x, ax=ax_img)
-
+plt.subplot(2, 1, 2)
 linear = polynomial_schedule(
     betas.min(), betas.max(), config.diffusion.timesteps, exponent=1.0
 )
-ax_plot.plot(linear, label="linear", color="black", linestyle="dotted")
-ax_plot.plot(betas)
+plt.plot(linear, label="linear", color="black", linestyle="dotted")
+plt.plot(betas)
 for s in ["top", "bottom", "left", "right"]:
-    ax_plot.spines[s].set_visible(False)
+    plt.gca().spines[s].set_visible(False)
 
 show("betas_schedule")
 
@@ -252,46 +227,54 @@ class TrainState(train_state.TrainState):
 
 
 # %%
+import flax.linen as nn
+
+
+class SinusoidalPosEmb(nn.Module):
+    dim: int
+
+    def __call__(self, t):
+        half_dim = self.dim // 2
+        mul = jnp.log(10000) / (half_dim - 1)
+        emb = jnp.exp(-mul * jnp.arange(half_dim))
+        emb = t[:, None] * emb[None, :]
+        emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
+        return emb
+
+
+class TimeConditionedDense(nn.Module):
+    units: int
+    emb_dim: int
+
+    @nn.compact
+    def __call__(self, x, t):
+        t_embeddings = SinusoidalPosEmb(self.emb_dim)(t)
+        x = jnp.concatenate([x, t_embeddings], axis=-1)
+        x = nn.Dense(self.units)(x)
+        return x
+
+
+class Denoiser(nn.Module):
+    units: int = 128
+    emb_dim: int = 32
+
+    @nn.compact
+    def __call__(self, x, t):
+        inputs_units = x.shape[-1]
+        dense = lambda units: TimeConditionedDense(units, self.emb_dim)
+        x = nn.relu(dense(self.units)(x, t))
+        x = nn.relu(dense(self.units)(x, t)) + x
+        x = nn.relu(dense(self.units)(x, t)) + x
+        x = dense(inputs_units)(x, t)
+        return x
+
+
+# %%
 import optax
 from jax_metrics.metrics import Mean, Metrics
 
-from models.mlp_mixer import MLPMixer
-from models.simple_cnn import SimpleCNN
-from models.simple_unet import SimpleUNet
-from models.unet_lucid import UNet
-from models.unet_stable import UNet2DConfig, UNet2DModule
-
-if config.model == "stable_unet":
-    module = UNet2DModule(
-        UNet2DConfig(
-            out_channels=num_channels,
-            down_block_types=(
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "CrossAttnDownBlock2D",
-            ),
-            up_block_types=(
-                "CrossAttnUpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-            ),
-            block_out_channels=(
-                128,
-                128,
-                256,
-                256,
-            ),
-            cross_attention_dim=256,
-        )
-    )
-elif config.model == "lucid_unet":
-    module = UNet(dim=64, dim_mults=(1, 2, 4), channels=num_channels)
-else:
-    raise ValueError(f"Unknown model: '{config.model}'")
-
-variables = module.init(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]))
+module = Denoiser(units=config.model.units, emb_dim=config.model.emb_dim)
+variables = module.init(jax.random.PRNGKey(42), X[:1], jnp.array([0]))
 tx = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adamw(
@@ -322,10 +305,11 @@ metrics = Metrics(
     ]
 ).init()
 
-print(module.tabulate(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]), depth=1))
+print(module.tabulate(jax.random.PRNGKey(42), X[:1], jnp.array([0]), depth=1))
 
 # %%
 from functools import partial
+from einop import einop
 
 
 @jax.jit
@@ -396,13 +380,13 @@ from tqdm import tqdm
 
 from utils import log_metrics
 
-print(jax.devices())
-
 key = jax.random.PRNGKey(42)
 axs_diffusion = None
+axs_samples = None
 ds_iterator = ds.as_numpy_iterator()
 logs = {}
 step = 0
+history = []
 
 # %%
 
@@ -410,33 +394,32 @@ for step in tqdm(
     range(step, config.total_steps), total=config.total_steps, unit="step"
 ):
 
-    if step % config.eval_every == 0:
+    if step % config.steps_per_epoch == 0:
         # --------------------
         # visualize progress
         # --------------------
-        print("Sampling...")
-        n_rows = 3
-        n_cols = 5
+        n_cols = 7
+        n_samples = 1000
         viz_key = jax.random.PRNGKey(1)
-        x = jax.random.normal(viz_key, (n_rows * n_cols, *x_sample.shape[1:]))
+        x = jax.random.normal(viz_key, (n_samples, *X.shape[1:]))
 
         ts = np.arange(config.diffusion.timesteps)[::-1]
-        xf = np.asarray(
-            sample(viz_key, x, ts, state.ema.params, process, return_all=False)
+        xs = np.asarray(
+            sample(viz_key, x, ts, state.ema.params, process, return_all=True)
         )
-        xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
+        if axs_diffusion is None or get_ipython():
+            _, axs_diffusion = plt.subplots(1, n_cols, figsize=(n_cols * 3, 3))
 
-        if axs_diffusion is None or get_ipython() or config.viz == "wandb":
-            plt.figure(figsize=(3 * n_cols, 3 * n_rows))
-            axs_diffusion = plt.gca()
-
-        axs_diffusion.clear()
-        render_image(xf, ax=axs_diffusion)
+        ts = jnp.linspace(0, config.diffusion.timesteps - 1, n_cols).astype(int)
+        for i, ti in enumerate(ts):
+            axs_diffusion[i].clear()
+            axs_diffusion[i].scatter(xs[ti, :, 0], xs[ti, :, 1], s=1)
+            axs_diffusion[i].axis("off")
         show("training_samples", step=step)
 
-    if step % config.log_every == 0:
-        print()  # newline
-        log_metrics(logs, step)
+    if step % config.log_every == 0 and logs != {}:
+        log_metrics(logs, step, do_print=False)
+        history.append(logs)
         metrics = metrics.reset()
 
     # --------------------
@@ -445,7 +428,16 @@ for step in tqdm(
     x = ds_iterator.next()
     logs, key, state, metrics = train_step(key, x, state, metrics, process)
     state = state.ema_update(step)
+    logs["step"] = step
 
+# %%
+# plot history
+plt.figure(figsize=(10, 5))
+steps = np.array([h["step"] for h in history])
+plt.plot(steps, [h["loss"] for h in history], label="loss")
+plt.plot(steps, [h["ema_loss"] for h in history], label="ema_loss")
+plt.legend()
+plt.show()
 
 # %%
 n_rows = 3
@@ -460,3 +452,5 @@ xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 plt.figure(figsize=(3 * n_cols, 3 * n_rows))
 render_image(xf)
 show("final_samples")
+
+# %%

@@ -188,11 +188,12 @@ def piecewise_constant_schedule(
     return schedule
 
 
-def log_metrics(logs, step):
+def log_metrics(logs, step, do_print=True):
     if logs is None:
         return
 
     if CONFIG.viz == "wandb":
         wandb.log(logs, step=step)
 
-    print(f"step: {step}, " + ", ".join(f"{k}: {v:.4f}" for k, v in logs.items()))
+    if do_print:
+        print(f"step: {step}, " + ", ".join(f"{k}: {v:.4f}" for k, v in logs.items()))

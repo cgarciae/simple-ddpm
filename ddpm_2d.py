@@ -16,7 +16,7 @@
 
 # %%
 from dataclasses import dataclass
-
+from utils import setup_config
 from IPython import get_ipython
 
 
@@ -29,59 +29,46 @@ class Config:
     lr: float = 1e-3
     num_steps: int = 50
     schedule_exponent: float = 2.0
+    viz: str = "matplotlib"
 
     @property
     def steps_per_epoch(self) -> int:
         return self.total_samples // (self.epochs * self.batch_size)
 
 
-config = Config()
-
-# %%
-
-if not get_ipython():
-    import sys
-
-    from absl import flags
-    from ml_collections import config_flags
-
-    config_flag = config_flags.DEFINE_config_dataclass("config", config)
-    flags.FLAGS(sys.argv)
-    config = config_flag.value
-
-
-def show_interactive():
-    if not get_ipython():
-        plt.ion()
-        plt.pause(1)
-        plt.ioff()
-    else:
-        plt.show()
-
+config = setup_config(Config)
 
 # %%
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_blobs, make_moons
 from sklearn.preprocessing import MinMaxScaler
+from utils import show
+import tensorflow as tf
 
 
-def get_data(dataset: str = "moons"):
-    if dataset == "moons":
+def get_data(config: Config):
+    if config.dataset == "moons":
         X, y = make_moons(n_samples=1000, noise=0.1, random_state=0)
-    elif dataset == "blobs":
+    elif config.dataset == "blobs":
         X = make_blobs(n_samples=1000, centers=6, cluster_std=0.5, random_state=6)[0]
     else:
-        raise ValueError(f"Unknown dataset: {dataset}")
+        raise ValueError(f"Unknown dataset: {config.dataset}")
 
     X = MinMaxScaler((-1, 1)).fit_transform(X)
-    return X
+    ds = tf.data.Dataset.from_tensor_slices(X.astype(np.float32))
+    ds = ds.repeat()
+    ds = ds.shuffle(seed=42, buffer_size=1_000)
+    ds = ds.batch(config.batch_size, drop_remainder=True)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+
+    return x, ds
 
 
-X = get_data(config.dataset)
+X, ds = get_data(config)
 
 plt.figure()
 plt.scatter(X[:, 0], X[:, 1], s=1)
-show_interactive()
+show("samples")
 
 
 # %%
@@ -109,7 +96,8 @@ class GaussianDiffusion(PyTreeNode):
         )
 
 
-def forward_diffusion(process, key, x0, t):
+@jax.jit
+def forward_diffusion(process: GaussianDiffusion, key, x0, t):
     alpha_bars = expand_to(process.alpha_bars[t], x0)
     noise = jax.random.normal(key, x0.shape)
     xt = jnp.sqrt(alpha_bars) * x0 + jnp.sqrt(1.0 - alpha_bars) * noise
