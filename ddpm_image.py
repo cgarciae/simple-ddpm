@@ -23,6 +23,7 @@ from IPython import get_ipython
 
 from utils import setup_config
 
+print(jax.devices())
 
 @dataclass
 class EMAConfig:
@@ -38,13 +39,17 @@ class DiffusionConfig:
     beta_end: float = 0.5
     timesteps: int = 1_000
 
+@dataclass
+class OptimizerConfig:
+    lr_start: float = 2e-5
+    drop_1_mult: float = 1.0
+    drop_2_mult: float = 1.0
 
 @dataclass
 class Config:
     batch_size: int = 32
     epochs: int = 500
     total_samples: int = 5_000_000
-    lr: float = 5e-5
     loss_type: str = "mae"
     dataset: str = "cartoonset"
     viz: str = "matplotlib"
@@ -54,6 +59,7 @@ class Config:
     ema: EMAConfig = EMAConfig()
     schedule: DiffusionConfig = DiffusionConfig()
     diffusion: DiffusionConfig = DiffusionConfig()
+    optimizer: OptimizerConfig = OptimizerConfig()
 
     @property
     def steps_per_epoch(self) -> int:
@@ -66,7 +72,7 @@ class Config:
 
 config = setup_config(Config)
 
-print(jax.devices())
+
 
 
 # %%
@@ -296,10 +302,10 @@ tx = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adamw(
         optax.piecewise_constant_schedule(
-            config.lr,
+            config.optimizer.lr_start,
             {
-                int(config.total_steps / 3): 1 / 3,
-                int(config.total_steps * 2 / 3): 3 / 10,
+                int(config.total_steps * 1 / 3): config.optimizer.drop_1_mult,
+                int(config.total_steps * 2 / 3): config.optimizer.drop_2_mult,
             },
         )
     ),
