@@ -14,9 +14,17 @@
 #     name: python3
 # ---
 
+# %%
+import os
+
+os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = "1,1,1"
+os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
+# Different per process:
+os.environ["TPU_VISIBLE_DEVICES"] = "0"  # "1", "2", "3"
 
 # %%
 
+from typing import Any, Dict, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
@@ -50,8 +58,6 @@ def get_data():
 
 
 # %%
-
-
 X, ds = get_data()
 
 plt.figure()
@@ -204,6 +210,7 @@ class Denoiser(nn.Module):
 
 from clu.metrics import Average, Collection
 from flax import struct
+from flax.training import train_state
 
 
 @struct.dataclass
@@ -215,9 +222,14 @@ class Metrics(Collection):
         return self.merge(updates)
 
 
+class State(train_state.TrainState):
+    metrics: Metrics
+    key: jnp.ndarray
+    process: GaussianDiffusion
+
+
 # %%
 import optax
-from flax.training.train_state import TrainState
 
 
 # model
@@ -242,10 +254,14 @@ tx = optax.chain(
         )
     ),
 )
-state: TrainState = TrainState.create(
-    apply_fn=module.apply, params=variables["params"], tx=tx
+state: State = State.create(
+    apply_fn=module.apply,
+    params=variables["params"],
+    tx=tx,
+    metrics=Metrics.empty(),
+    process=process,
+    key=jax.random.PRNGKey(42),
 )
-metrics = Metrics.empty()
 
 print(module.tabulate(jax.random.PRNGKey(42), X[:1], jnp.array([0]), depth=1))
 
@@ -304,78 +320,78 @@ def loss_fn(params, xt, t, noise):
 
 
 @jax.jit
-def train_step(key, x, state: TrainState, metrics: Metrics, process: GaussianDiffusion):
+def train_step(state: State, x, step) -> Tuple[Dict, State]:
     print("compiling 'train_step' ...")
-    key_t, key_diffusion, key = jax.random.split(key, 3)
+    key_time, key_diffusion, key = jax.random.split(state.key, 3)
     t = jax.random.uniform(
-        key_t, (x.shape[0],), minval=0, maxval=diffusion_timesteps - 1
+        key_time, (x.shape[0],), minval=0, maxval=diffusion_timesteps - 1
     ).astype(jnp.int32)
-    xt, noise = forward_diffusion(process, key_diffusion, x, t)
+    xt, noise = forward_diffusion(state.process, key_diffusion, x, t)
     loss, grads = jax.value_and_grad(loss_fn)(state.params, xt, t, noise)
     state = state.apply_gradients(grads=grads)
-    metrics = metrics.update(loss=loss)
+    metrics = state.metrics.update(loss=loss)
     logs = metrics.compute()
-    return logs, key, state, metrics
+    return logs, state.replace(key=key, metrics=metrics)
 
 
 # %%
 import numpy as np
-from tqdm import tqdm
+
+key = jax.random.PRNGKey(42)
+ds_iterator = ds.as_numpy_iterator()
+
+
+def viz_step(state: State, batch, step):
+    n_cols = 7
+    n_samples = 1000
+    viz_key = jax.random.PRNGKey(1)
+    x = jax.random.normal(viz_key, (n_samples, *X.shape[1:]))
+
+    ts = np.arange(diffusion_timesteps)[::-1]
+    xs = np.asarray(
+        sample(viz_key, x, ts, state.params, state.process, return_all=True)
+    )
+    ts = jnp.linspace(0, diffusion_timesteps - 1, n_cols).astype(int)
+
+    _, axs = plt.subplots(1, n_cols, figsize=(n_cols * 3, 3))
+    for i, ti in enumerate(ts):
+        axs[i].scatter(xs[ti, :, 0], xs[ti, :, 1], s=1)
+        axs[i].axis("off")
+    plt.show()
+
+
+# %%
+from looper import Loop, every, tqdm_bar, keras_bar, Period
+from clu.periodic_actions import ReportProgress, Profile
+from clu import metric_writers
+
 
 eval_every: int = 2000
 log_every: int = 200
+logdir = "logs"
 
-key = jax.random.PRNGKey(42)
-axs_diffusion = None
-axs_samples = None
-ds_iterator = ds.as_numpy_iterator()
 
-step = 0
-history = []
-
-# %%
-
-for step in tqdm(range(step, total_steps), total=total_steps, unit="step"):
-    logs = {}
-
-    if step % steps_per_epoch == 0:
-        # --------------------
-        # visualize progress
-        # --------------------
-        n_cols = 7
-        n_samples = 1000
-        viz_key = jax.random.PRNGKey(1)
-        x = jax.random.normal(viz_key, (n_samples, *X.shape[1:]))
-
-        ts = np.arange(diffusion_timesteps)[::-1]
-        xs = np.asarray(sample(viz_key, x, ts, state.params, process, return_all=True))
-        if axs_diffusion is None or get_ipython():
-            _, axs_diffusion = plt.subplots(1, n_cols, figsize=(n_cols * 3, 3))
-
-        ts = jnp.linspace(0, diffusion_timesteps - 1, n_cols).astype(int)
-        for i, ti in enumerate(ts):
-            axs_diffusion[i].clear()
-            axs_diffusion[i].scatter(xs[ti, :, 0], xs[ti, :, 1], s=1)
-            axs_diffusion[i].axis("off")
-        plt.show()
-
-    if step % log_every == 0 and logs != {}:
-        log_metrics(logs, step, do_print=False)
-        history.append(logs)
-        metrics = metrics.empty()
-
-    # --------------------
-    # trainig step
-    # --------------------
-    x = ds_iterator.next()
-    logs, key, state, metrics = train_step(key, x, state, metrics, process)
-    logs["step"] = step
+loop = Loop()
+total = Period(time=30)
+state = loop.run(
+    ds_iterator,
+    state=state,
+    schedule_callbacks={
+        every(steps_per_epoch): [viz_step],
+        every(1): [
+            train_step,
+            tqdm_bar(total=total),
+            # keras_bar(total=total, always_stateful=True, interval=0.3),
+        ],
+    },
+    total=total,
+)
 
 # %%
 # plot history
 plt.figure(figsize=(10, 5))
-steps = np.array([h["step"] for h in history])
-plt.plot(steps, [h["loss"] for h in history], label="loss")
+steps = np.array([logs["elapsed"].steps for logs in loop.history if "loss" in logs])
+plt.plot(steps, [logs["loss"] for logs in loop.history if "loss" in logs], label="loss")
 plt.legend()
 plt.show()
 
@@ -384,7 +400,7 @@ n_samples = 1000
 viz_key = jax.random.PRNGKey(1)
 x = jax.random.normal(viz_key, (n_samples, *X.shape[1:]))
 ts = np.arange(diffusion_timesteps)[::-1]
-x = np.asarray(sample(viz_key, x, ts, state.params, process, return_all=False))
+x = np.asarray(sample(viz_key, x, ts, state.params, state.process, return_all=False))
 
 # plot x and X side by side
 _, axs = plt.subplots(1, 2, figsize=(10, 5))
@@ -395,3 +411,5 @@ axs[1].scatter(X[:, 0], X[:, 1], s=1)
 axs[1].axis("off")
 axs[1].set_title("data")
 plt.show()
+
+# %%

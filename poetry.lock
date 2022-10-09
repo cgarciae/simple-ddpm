@@ -851,20 +851,6 @@ minimum-jaxlib = ["jaxlib (==0.3.14)"]
 tpu = ["jaxlib (==0.3.15)", "libtpu-nightly (==0.1.dev20220723)", "requests"]
 
 [[package]]
-name = "jax-metrics"
-version = "0.1.2"
-description = ""
-category = "main"
-optional = false
-python-versions = ">=3.7,<3.11"
-
-[package.dependencies]
-certifi = ">=2021.10.8,<2022.0.0"
-einops = ">=0.4.0,<0.5.0"
-optax = ">=0.1.1,<0.2.0"
-treeo = ">=0.2.1,<0.3.0"
-
-[[package]]
 name = "jaxlib"
 version = "0.3.15"
 description = "XLA library for JAX"
@@ -2257,17 +2243,6 @@ python-versions = ">=3.7"
 test = ["pre-commit", "pytest"]
 
 [[package]]
-name = "treeo"
-version = "0.2.1"
-description = ""
-category = "main"
-optional = false
-python-versions = ">=3.7,<4.0"
-
-[package.dependencies]
-typing-extensions = ">=3.7.0"
-
-[[package]]
 name = "typing-extensions"
 version = "4.3.0"
 description = "Backported and Experimental Type Hints for Python 3.7+"
@@ -2424,7 +2399,7 @@ testing = ["func-timeout", "jaraco.itertools", "pytest (>=6)", "pytest-black (>=
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.8,<3.11"
-content-hash = "ed2138d78b952decba4212ed9eefdc7657fa92db4ea81330aac100e92f372974"
+content-hash = "782bdd8e382b1cf69f4bb7c5a404280df12739758854ab5675184546f941d780"
 
 [metadata.files]
 absl-py = [
@@ -3003,10 +2978,6 @@ ipython-genutils = [
 ]
 jax = [
     {file = "jax-0.3.17.tar.gz", hash = "sha256:2a2794e4e0c93595a1b1d625026580c0686be93bd60d4f6906b090446692cadc"},
-]
-jax-metrics = [
-    {file = "jax_metrics-0.1.2-py3-none-any.whl", hash = "sha256:d3e2bc06645cb4ba59775965e315ac6b4a79f76e6e74bd6e21f229782c18711c"},
-    {file = "jax_metrics-0.1.2.tar.gz", hash = "sha256:d529e59b467f6a94b35b57f5949f16518ad079bf31a911506edd31918637e4da"},
 ]
 jaxlib = [
     {file = "jaxlib-0.3.15-cp310-none-macosx_10_14_x86_64.whl", hash = "sha256:7555be95d567572579a2010ed03506e31ff87d55c21c1bc80eddcccd87b3f723"},
@@ -4231,10 +4202,6 @@ tqdm = [
 traitlets = [
     {file = "traitlets-5.3.0-py3-none-any.whl", hash = "sha256:65fa18961659635933100db8ca120ef6220555286949774b9cfc106f941d1c7a"},
     {file = "traitlets-5.3.0.tar.gz", hash = "sha256:0bb9f1f9f017aa8ec187d8b1b2a7a6626a2a1d877116baba52a129bfa124f8e2"},
-]
-treeo = [
-    {file = "treeo-0.2.1-py3-none-any.whl", hash = "sha256:931d607006a6e872caa57fabfc01da6c89be0ba52f8a0a7ad86e4987c6b9c87a"},
-    {file = "treeo-0.2.1.tar.gz", hash = "sha256:bf33ebd30076f856ce0bbe8bc7c99eb27499dae759949372541094e93ccf204a"},
 ]
 typing-extensions = [
     {file = "typing_extensions-4.3.0-py3-none-any.whl", hash = "sha256:25642c956049920a5aa49edcdd6ab1e06d7e5d467fc00e0506c44ac86fbfca02"},

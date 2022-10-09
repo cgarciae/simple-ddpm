@@ -25,6 +25,7 @@ from utils import setup_config
 
 print(jax.devices())
 
+
 @dataclass
 class EMAConfig:
     decay: float = 0.995
@@ -39,11 +40,13 @@ class DiffusionConfig:
     beta_end: float = 0.5
     timesteps: int = 1_000
 
+
 @dataclass
 class OptimizerConfig:
     lr_start: float = 2e-5
     drop_1_mult: float = 1.0
     drop_2_mult: float = 1.0
+
 
 @dataclass
 class Config:
@@ -71,8 +74,6 @@ class Config:
 
 
 config = setup_config(Config)
-
-
 
 
 # %%

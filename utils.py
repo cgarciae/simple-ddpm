@@ -197,3 +197,195 @@ def log_metrics(logs, step, do_print=True):
 
     if do_print:
         print(f"step: {step}, " + ", ".join(f"{k}: {v:.4f}" for k, v in logs.items()))
+
+
+# ----------------------------------
+# Lookahead patch
+# ----------------------------------
+
+from typing import NamedTuple, Tuple
+
+from absl import logging
+import jax
+import jax.numpy as jnp
+
+from optax._src import base
+from optax import apply_updates
+
+# pylint:disable=no-value-for-parameter
+
+
+class LookaheadState(NamedTuple):
+    """State of the `GradientTransformation` returned by `lookahead`.
+
+    Attributes:
+      fast_state: Optimizer state of the fast optimizer.
+      steps_since_sync: Number of fast optimizer steps taken since slow and fast
+        parameters were synchronized.
+    """
+
+    fast_state: base.OptState
+    slow_params: base.Params
+    steps_since_sync: jnp.ndarray
+
+
+class LookaheadParams(NamedTuple):
+    """Holds a pair of slow and fast parameters for the lookahead optimizer.
+
+    Gradients should always be calculated with the fast parameters. The slow
+    parameters should be used for testing and inference as they generalize better.
+    See the reference for a detailed discussion.
+
+    References:
+      [Zhang et al, 2019](https://arxiv.org/pdf/1907.08610v1.pdf)
+
+    Attributes:
+      fast: Fast parameters.
+      slow: Slow parameters.
+    """
+
+    fast: base.Params
+    slow: base.Params
+
+    @classmethod
+    def init_synced(cls, params: base.Params) -> "LookaheadParams":
+        """Initialize a pair of synchronized lookahead parameters."""
+        return cls(slow=params, fast=params)
+
+
+def lookahead(
+    fast_optimizer: base.GradientTransformation,
+    sync_period: int,
+    slow_step_size: float,
+    reset_state: bool = False,
+) -> base.GradientTransformation:
+    """Lookahead optimizer.
+
+    Performs steps with a fast optimizer and periodically updates a set of slow
+    parameters. Optionally resets the fast optimizer state after synchronization
+    by calling the init function of the fast optimizer.
+
+    Updates returned by the lookahead optimizer should not be modified before they
+    are applied, otherwise fast and slow parameters are not synchronized
+    correctly.
+
+    References:
+      [Zhang et al, 2019](https://arxiv.org/pdf/1907.08610v1.pdf)
+
+    Args:
+      fast_optimizer: The optimizer to use in the inner loop of lookahead.
+      sync_period: Number of fast optimizer steps to take before synchronizing
+        parameters. Must be >= 1.
+      slow_step_size: Step size of the slow parameter updates.
+      reset_state: Whether to reset the optimizer state of the fast opimizer after
+        each synchronization.
+
+    Returns:
+      A `GradientTransformation` with init and update functions. The updates
+      passed to the update function should be calculated using the fast lookahead
+      parameters only.
+    """
+    if sync_period < 1:
+        raise ValueError("Synchronization period must be >= 1.")
+
+    def init_fn(params: base.Params) -> LookaheadState:
+
+        return LookaheadState(
+            fast_state=fast_optimizer.init(params),
+            slow_params=params,
+            steps_since_sync=jnp.zeros(shape=(), dtype=jnp.int32),
+        )
+
+    def update_fn(
+        updates: base.Updates, state: LookaheadState, params: base.Params
+    ) -> Tuple[base.Params, LookaheadState]:
+        fast_params = params
+        slow_params = state.slow_params
+        updates, fast_state = fast_optimizer.update(updates, state.fast_state, params)
+
+        sync_next = state.steps_since_sync == sync_period - 1
+        updates, slow_params = _lookahead_update(
+            updates, sync_next, slow_params, fast_params, slow_step_size
+        )
+        if reset_state:
+            # Jittable way of resetting the fast optimizer state if parameters will be
+            # synchronized after this update step.
+            initial_state = fast_optimizer.init(params)
+            fast_state = jax.tree_util.tree_map(
+                lambda current, init: (1 - sync_next) * current + sync_next * init,
+                fast_state,
+                initial_state,
+            )
+
+        steps_since_sync = (state.steps_since_sync + 1) % sync_period
+        return updates, LookaheadState(fast_state, slow_params, steps_since_sync)
+
+    return base.GradientTransformation(init_fn, update_fn)
+
+
+def _lookahead_update(
+    updates: base.Updates,
+    sync_next: bool,
+    slow_params: base.Params,
+    fast_params: base.Params,
+    slow_step_size: float,
+) -> Tuple[base.Updates, base.Params]:
+    """Returns the updates corresponding to one lookahead step.
+
+    References:
+      [Zhang et al, 2019](https://arxiv.org/pdf/1907.08610v1.pdf)
+
+    Args:
+      updates: Updates returned by the fast optimizer.
+      sync_next: Wether fast and slow parameters should be synchronized after the
+        fast optimizer step.
+      params: Current fast and slow parameters as `LookaheadParams` object.
+      slow_step_size: Step size of the slow optimizer.
+
+    Returns:
+      The updates for the lookahead parameters.
+    """
+    # In the paper, lookahead is presented as two nested loops. To write lookahead
+    # as optax wrapper, these loops have to be broken into successive updates.
+    # This leads to two types of update steps:
+    #
+    # Non-synchronization steps (sync_next == False):
+    # The updates returned by the fast optimizer are used for the fast parameters
+    # without change and the slow parameter updates are zero (i.e. fast_updates =
+    # updates, slow_updates = 0).
+    #
+    # Synchronisation step (sync_next == True):
+    # This consists of two substeps: a last fast optimizer step and the
+    # synchronization.
+    #   Substep 1 (last fast optimizer step):
+    #     last_fast_params = fast_params + updates
+    #   Substep 2 (synchronization):
+    #     new_slow_params = slow_params + slow_step_size * (
+    #                       last_fast_params - slow_params)
+    #     new_fast_params = new_slow_params
+    #
+    #   Merging into a single update step we get the update rules:
+    #     slow_updates = slow_step_size * (fast_params + updates - slow_params)
+    #     fast_updates = new_slow_params - fast_params = updates - (1 -
+    #       slow_step_size) * (fast_params + updates - slow_params)
+    #
+    # To make the equations jittable, the two types of steps are merged. Defining
+    # last_difference = fast_params + updates - slow_params, this yields the
+    # following equtions which are implemented below:
+    #   slow_updates = slow_step_size * sync_next * last_difference
+    #   fast_updates = updates - (
+    #                  1 - slow_step_size) * sync_next * last_difference
+    last_difference = jax.tree_util.tree_map(
+        lambda f, u, s: f + u - s, fast_params, updates, slow_params
+    )
+    slow_updates = jax.tree_util.tree_map(
+        lambda diff: slow_step_size * sync_next * diff, last_difference
+    )
+    fast_updates = jax.tree_util.tree_map(
+        lambda up, diff: up - sync_next * (1 - slow_step_size) * diff,
+        updates,
+        last_difference,
+    )
+    slow_params = jax.tree_util.tree_map(apply_updates, slow_params, slow_updates)
+
+    return fast_updates, slow_params
