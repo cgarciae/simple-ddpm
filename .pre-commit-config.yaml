@@ -1,7 +1,7 @@
 
 repos:
--   repo: https://github.com/mwouts/jupytext
-    rev: v1.14.0  # CURRENT_TAG/COMMIT_HASH
-    hooks:
-    - id: jupytext
-      args: [--sync]
+- repo: https://github.com/mwouts/jupytext
+  rev: v1.14.0
+  hooks:
+  - id: jupytext
+    args: [--sync]

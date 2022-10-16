@@ -22,6 +22,8 @@ pkbar = "^0.5"
 tensorflow-cpu = "^2.10.0"
 wandb = "^0.13.3"
 gitignore-parser = "^0.1.0"
+tensorflow-datasets = "^4.7.0"
+ciclo = {path = "../ciclo", develop = true}
 
 
 [tool.poetry.dev-dependencies]
