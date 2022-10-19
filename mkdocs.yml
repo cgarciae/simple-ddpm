@@ -1,8 +1,7 @@
 site_name: My Docs
 
 nav:
-- Home: index.md
-- Notebook page: notebooks/ddpm_2d.md
+- Denoising Diffusion 2D: notebooks/ddpm_2d.md
 
 theme:
   name: material
