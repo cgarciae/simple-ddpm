@@ -1,4 +1,4 @@
-site_name: My Docs
+site_name: Simple Diffusion Models
 
 nav:
 - Denoising Diffusion 2D: notebooks/ddpm_2d.md
