@@ -15,7 +15,7 @@ flax = ">=0.6.0"
 einop = ">=0.0.1"
 pre-commit = ">=2.20.0"
 jupytext = ">=1.14.1"
-nbconvert = ">=7.0.0"
+nbconvert = ">=6.2.0,<7.0.0"
 jupyter-contrib-nbextensions = ">=0.5.1"
 datasets = ">=2.4.0"
 pkbar = ">=0.5"
@@ -24,6 +24,8 @@ wandb = ">=0.13.3"
 gitignore-parser = ">=0.1.0"
 tensorflow-datasets = ">=4.7.0"
 ciclo = {path = "../ciclo", develop = true}
+mkdocs-material = "^8.5.6"
+mkdocs-jupyter = "^0.22.0"
 
 
 [tool.poetry.dev-dependencies]
