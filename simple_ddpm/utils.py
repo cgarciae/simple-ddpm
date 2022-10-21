@@ -90,6 +90,8 @@ def get_wandb_run(config) -> Run:
                 not ignored(path)
                 and "notebooks" not in path
                 and not path.endswith(".ipynb")
+                and not path.endswith(".png")
+                and not path.endswith(".gif")
             )
         except:
             return False
