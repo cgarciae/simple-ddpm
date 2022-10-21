@@ -1,4 +1,5 @@
 import sys
+from dataclasses import asdict, dataclass
 from typing import (
     Any,
     Callable,
@@ -14,44 +15,30 @@ from typing import (
 
 import jax
 import jax.numpy as jnp
-from absl import flags
-from ml_collections import config_flags
-import wandb
 import matplotlib.pyplot as plt
-from IPython import get_ipython
-from gitignore_parser import parse_gitignore
-from dataclasses import asdict, dataclass
 import numpy as np
-from typing_extensions import Protocol
-from flax.struct import PyTreeNode, field
+import wandb
+from wandb.wandb_run import Run
+from absl import flags
 from flax import traverse_util
-
-
-class Config(Protocol):
-    viz: str
-    dataset: str
-
-
-CONFIG: Optional[Config]
-CONFIG = None
+from flax.struct import PyTreeNode, field
+from gitignore_parser import parse_gitignore
+from IPython import get_ipython
+from ml_collections import config_flags
+from typing_extensions import Protocol
 
 A = TypeVar("A")
-C = TypeVar("C", bound=Config)
 
 
 class EMA(Generic[A], PyTreeNode):
     params: A
     decay_fn: Callable[[jnp.ndarray], jnp.ndarray] = field(pytree_node=False)
-    update_after_step: int = field(pytree_node=False)
-    update_every: int = field(pytree_node=False)
 
     @classmethod
     def create(
         cls,
         params: A,
         decay: Union[float, Callable[[jnp.ndarray], jnp.ndarray]],
-        update_after_step: int = -1,
-        update_every: int = 10,
     ):
         if isinstance(decay, (float, int, np.ndarray, jnp.ndarray)):
             decay_fn = lambda _: jnp.asarray(decay, dtype=jnp.float32)
@@ -61,22 +48,14 @@ class EMA(Generic[A], PyTreeNode):
         return cls(
             params=params,
             decay_fn=decay_fn,
-            update_after_step=update_after_step,
-            update_every=update_every,
         )
 
-    def update(self, step: int, new_params) -> "EMA":
-        if step <= self.update_after_step:
-            ema_params = new_params
-        elif step % self.update_every == 0:
-            ema_params = self._ema_update(step, new_params)
-        else:
-            ema_params = self.params
-
-        return self.replace(params=ema_params)
+    def update(self, new_params, step: int) -> "EMA":
+        params = self._ema_update(new_params, step)
+        return self.replace(params=params)
 
     @jax.jit
-    def _ema_update(self, step, new_params):
+    def _ema_update(self, new_params, step):
         decay = self.decay_fn(step)
 
         def _ema(ema_params, new_params):
@@ -85,43 +64,39 @@ class EMA(Generic[A], PyTreeNode):
         return jax.tree_map(_ema, self.params, new_params)
 
 
-def setup_config(config_class: Type[C]) -> C:
-    global CONFIG
-
+def parse_config(config_class: Type[A]) -> A:
     config = config_class()
+    config_flag = config_flags.DEFINE_config_dataclass("config", config)
+    flags.FLAGS(sys.argv)
+    return config_flag.value
 
-    if not get_ipython():
-        config_flag = config_flags.DEFINE_config_dataclass("config", config)
-        flags.FLAGS(sys.argv)
-        config = config_flag.value
 
-    CONFIG = config
+def get_wandb_run(config) -> Run:
 
+    run = wandb.init(
+        project=f"ddpm-{config.dataset}",
+        config={
+            ".".join(p): v
+            for p, v in traverse_util.flatten_dict(asdict(config)).items()
+        },
+        save_code=True,
+    )
+
+    ignored = parse_gitignore(".gitignore")
+
+    def include_fn(path: str) -> bool:
+        try:
+            return not ignored(path) and "_files" not in path
+        except:
+            return False
+
+    run.log_code(include_fn=include_fn)
+
+    return run
+
+
+def show(config, name: str, step: int = 0):
     if config.viz == "wandb":
-        run = wandb.init(
-            project=f"ddpm-{config.dataset}",
-            config={
-                ".".join(p): v
-                for p, v in traverse_util.flatten_dict(asdict(config)).items()
-            },
-            save_code=True,
-        )
-
-        ignored = parse_gitignore(".gitignore")
-
-        def include_fn(path: str) -> bool:
-            try:
-                return not ignored(path) and "_files" not in path
-            except:
-                return False
-
-        run.log_code(include_fn=include_fn)
-
-    return config
-
-
-def show(name: str, step: int = 0):
-    if CONFIG.viz == "wandb":
         wandb.log({name: plt}, step=step)
     elif not get_ipython():
         plt.ion()
@@ -188,16 +163,6 @@ def piecewise_constant_schedule(
     return schedule
 
 
-def log_metrics(logs, step, do_print=True):
-    if logs is None:
-        return
-
-    if CONFIG.viz == "wandb":
-        wandb.log(logs, step=step)
-
-    if do_print:
-        print(f"step: {step}, " + ", ".join(f"{k}: {v:.4f}" for k, v in logs.items()))
-
 
 # ----------------------------------
 # Lookahead patch
@@ -205,12 +170,11 @@ def log_metrics(logs, step, do_print=True):
 
 from typing import NamedTuple, Tuple
 
-from absl import logging
 import jax
 import jax.numpy as jnp
-
-from optax._src import base
+from absl import logging
 from optax import apply_updates
+from optax._src import base
 
 # pylint:disable=no-value-for-parameter
 

@@ -16,7 +16,7 @@
 
 # %%
 from dataclasses import dataclass
-from utils import setup_config
+from simple_ddpm.utils import setup_config
 from IPython import get_ipython
 
 
@@ -42,7 +42,7 @@ config = setup_config(Config)
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_blobs, make_moons
 from sklearn.preprocessing import MinMaxScaler
-from utils import show
+from simple_ddpm.utils import show
 import tensorflow as tf
 
 

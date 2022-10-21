@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import jax
 from IPython import get_ipython
 
-from utils import setup_config
+from simple_ddpm.utils import setup_config
 
 print(jax.devices())
 
@@ -133,7 +133,7 @@ ds = get_data(config.dataset, config.batch_size)
 # %%
 from einop import einop
 
-from utils import render_image, show
+from simple_ddpm.utils import render_image, show
 
 x_sample = ds.as_numpy_iterator().next()
 num_channels = x_sample.shape[-1]
@@ -241,7 +241,7 @@ show("betas_schedule")
 
 from flax.training import train_state
 
-from utils import EMA
+from simple_ddpm.utils import EMA
 
 
 class TrainState(train_state.TrainState):
@@ -401,7 +401,7 @@ def train_step(key, x, state: TrainState, metrics: Metrics, process: GaussianDif
 import numpy as np
 from tqdm import tqdm
 
-from utils import log_metrics
+from simple_ddpm.utils import log_metrics
 
 print(jax.devices())
 
