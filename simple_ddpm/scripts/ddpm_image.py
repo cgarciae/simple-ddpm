@@ -211,8 +211,6 @@ process = GaussianDiffusion.create(betas)
 visualize_schedule(config, process)
 
 # %%
-
-
 @struct.dataclass
 class Metrics(Collection):
     loss: Average.from_output("loss")
@@ -293,13 +291,10 @@ state: TrainState = TrainState.create(
     process=process,
 )
 
-
 print(module.tabulate(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]), depth=1))
 
 
 # %%
-
-
 @jax.jit
 def train_step(state: TrainState, x: jax.Array):
     print("compiling 'train_step' ...")
@@ -331,7 +326,7 @@ def visualize_samples(state: TrainState, x: jax.Array, elapsed: Elapsed):
     ts = np.arange(config.diffusion.timesteps)[::-1]
     xf = state.process.sample(
         viz_key,
-        lambda x, t: state.apply_fn({"params": state.params}, x, t),
+        lambda x, t: state.apply_fn({"params": state.ema.params}, x, t),
         x,
         ts,
         return_all=False,
@@ -354,7 +349,6 @@ def ema_update(state: TrainState, batch, elapsed: Elapsed):
 
 
 # %%
-
 state, history, _ = ciclo.loop(
     state,
     ds.as_numpy_iterator(),
@@ -364,7 +358,7 @@ state, history, _ = ciclo.loop(
         ciclo.every(config.eval_every): [visualize_samples],
         ciclo.every(config.log_every): [
             ciclo.wandb_logger(wandb_run),
-            ciclo.checkpoint("logdir/mnist_full", monitor="ema_loss", mode="min"),
+            ciclo.checkpoint(f"logdir/{wandb_run.id}", monitor="ema_loss", mode="min"),
             reset_metrics,
         ],
         ciclo.every(1): [ciclo.keras_bar(total=ciclo.at(steps=config.total_steps))],

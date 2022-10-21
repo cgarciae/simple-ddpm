@@ -86,7 +86,11 @@ def get_wandb_run(config) -> Run:
 
     def include_fn(path: str) -> bool:
         try:
-            return not ignored(path) and "_files" not in path
+            return (
+                not ignored(path)
+                and "notebooks" not in path
+                and not path.endswith(".ipynb")
+            )
         except:
             return False
 
@@ -161,7 +165,6 @@ def piecewise_constant_schedule(
         return values[index]
 
     return schedule
-
 
 
 # ----------------------------------
