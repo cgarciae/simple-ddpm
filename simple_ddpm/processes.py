@@ -4,6 +4,7 @@ from flax.struct import PyTreeNode
 import jax.numpy as jnp
 import jax
 from einop import einop
+from simple_ddpm.utils import print_compiling
 
 
 def expand_to(a, b):
@@ -24,20 +25,21 @@ class GaussianDiffusion(PyTreeNode):
             alpha_bars=jnp.cumprod(1.0 - betas),
         )
 
-    @jax.jit
-    def forward(self: "GaussianDiffusion", key, x0, t):
-        alpha_bars = expand_to(self.alpha_bars[t], x0)
-        noise = jax.random.normal(key, x0.shape)
-        xt = jnp.sqrt(alpha_bars) * x0 + jnp.sqrt(1.0 - alpha_bars) * noise
+    @print_compiling
+    def forward(self: "GaussianDiffusion", *, key, x, t):
+        alpha_bars = expand_to(self.alpha_bars[t], x)
+        noise = jax.random.normal(key, x.shape)
+        xt = jnp.sqrt(alpha_bars) * x + jnp.sqrt(1.0 - alpha_bars) * noise
         return xt, noise
 
-    @jax.jit
+    @print_compiling
     def reverse(
         self: "GaussianDiffusion",
+        *,
         key: jax.random.KeyArray,
-        noise_hat: jax.Array,
+        noise: jax.Array,
         x: jax.Array,
-        t: jax.Array,
+        t: jax.Array
     ) -> jax.Array:
         betas = expand_to(self.betas[t], x)
         alphas = expand_to(self.alphas[t], x)
@@ -46,34 +48,29 @@ class GaussianDiffusion(PyTreeNode):
         z = jnp.where(
             expand_to(t, x) > 0, jax.random.normal(key, x.shape), jnp.zeros_like(x)
         )
-        noise_scaled = betas / jnp.sqrt(1.0 - alpha_bars) * noise_hat
-        x = (x - noise_scaled) / jnp.sqrt(alphas) + jnp.sqrt(betas) * z
+        a = 1.0 / jnp.sqrt(alphas)
+        b = betas / jnp.sqrt(1.0 - alpha_bars)
+        x = a * (x - b * noise) + jnp.sqrt(betas) * z
         return x
 
-    def sample(
-        self,
-        key: jax.random.KeyArray,
-        model_fn: Callable[[jax.Array, jax.Array], jax.Array],
-        x0: jax.Array,
-        ts: jax.Array,
-        *,
-        return_all=True
-    ):
-        print("compiling 'sample' ...")
-        keys = jax.random.split(key, len(ts))
-        ts = einop(ts, "t -> t b", b=x0.shape[0])
+    @print_compiling
+    def sample(self, *, key, model_fn, state, x, t, return_all: bool = False):
+        keys = jax.random.split(key, len(t))
+        t = einop(t, "t -> t b", b=x.shape[0])
 
         def scan_fn(x, inputs):
             t, key = inputs
-            noise_hat = model_fn(x, t)
-            x = self.reverse(key, x, noise_hat, t)
+            noise_hat = model_fn(state, x, t)
+            x = self.reverse(key=key, noise=noise_hat, x=x, t=t)
             out = x if return_all else None
             return x, out
 
-        x, xs = jax.lax.scan(scan_fn, x0, (ts, keys))
-        return xs if return_all else x
+        xf, xt = jax.lax.scan(scan_fn, x, (t, keys))
+        return xt if xt is not None else xf
 
 
+GaussianDiffusion.forward = jax.jit(GaussianDiffusion.forward)
+GaussianDiffusion.reverse = jax.jit(GaussianDiffusion.reverse)
 GaussianDiffusion.sample = jax.jit(
-    GaussianDiffusion.sample, static_argnames=["return_all"]
+    GaussianDiffusion.sample, static_argnames=("model_fn", "return_all")
 )

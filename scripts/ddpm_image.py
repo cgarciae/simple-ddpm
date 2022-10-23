@@ -18,6 +18,7 @@
 
 from dataclasses import dataclass
 from functools import partial
+from typing import Any, Callable, Union
 
 import ciclo
 import jax
@@ -35,8 +36,15 @@ from flax.training import train_state
 from simple_ddpm.models.unet_lucid import UNet
 from simple_ddpm.models.unet_stable import UNet2DConfig, UNet2DModule
 from simple_ddpm.processes import GaussianDiffusion
-from simple_ddpm.utils import EMA, get_wandb_run, parse_config, render_image, show
+from simple_ddpm.utils import (
+    ema_update,
+    get_wandb_run,
+    parse_config,
+    render_image,
+    show,
+)
 from simple_ddpm import schedules
+from flax.training.checkpoints import AsyncManager
 
 
 @dataclass
@@ -223,14 +231,15 @@ class Metrics(Collection):
 
 class TrainState(train_state.TrainState):
     key: jax.random.KeyArray
-    ema: EMA
+    ema_params: Any
     metrics: Metrics
     process: GaussianDiffusion
+    config: Config
 
     @classmethod
-    def create(cls, *, apply_fn, params, tx, ema: EMA, **kwargs):
+    def create(cls, *, apply_fn, params, tx, **kwargs):
         return super().create(
-            apply_fn=apply_fn, params=params, tx=tx, ema=ema, **kwargs
+            apply_fn=apply_fn, params=params, tx=tx, ema_params=params, **kwargs
         )
 
 
@@ -309,28 +318,38 @@ def train_step(state: TrainState, x: jax.Array):
         return loss_metric(noise, noise_hat)
 
     loss, grads = jax.value_and_grad(loss_fn)(state.params)
-    ema_loss = loss_fn(state.ema.params)
+    ema_loss = loss_fn(state.ema_params)
     state = state.apply_gradients(grads=grads)
     metrics = state.metrics.update(loss=loss, ema_loss=ema_loss)
     logs = metrics.compute()
     return logs, state.replace(key=key, metrics=metrics)
 
 
-def visualize_samples(state: TrainState, x: jax.Array, elapsed: Elapsed):
+@jax.jit
+def sample(key, state: TrainState, x0, ts):
+    print("compiling 'sample' ...")
+    keys = jax.random.split(key, len(ts))
+    ts = einop(ts, "t -> t b", b=x0.shape[0])
+
+    def scan_fn(x, inputs):
+        t, key = inputs
+        noise_hat = state.apply_fn({"params": state.params}, x, t)
+        x = process.reverse(key, x, noise_hat, t)
+        return x, None
+
+    xf, _ = jax.lax.scan(scan_fn, x0, (ts, keys))
+    return xf
+
+
+def visualize_data(state: TrainState, x: jax.Array, elapsed: Elapsed):
     print("Sampling...")
     n_rows = 3
-    n_cols = 5
+    n_cols = 6
     viz_key = jax.random.PRNGKey(1)
     x = jax.random.normal(viz_key, (n_rows * n_cols, *x.shape[1:]))
 
     ts = np.arange(config.diffusion.timesteps)[::-1]
-    xf = state.process.sample(
-        viz_key,
-        lambda x, t: state.apply_fn({"params": state.ema.params}, x, t),
-        x,
-        ts,
-        return_all=False,
-    )
+    xf = sample(viz_key, state, x, ts)
     xf = np.asarray(xf)
     xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 
@@ -343,26 +362,48 @@ def reset_metrics(state: TrainState, x):
     return None, state.replace(metrics=Metrics.empty())
 
 
-def ema_update(state: TrainState, batch, elapsed: Elapsed):
-    ema = state.ema.update(state.params, elapsed.steps)
-    return None, state.replace(ema=ema)
+@dataclass
+class ema_step(ciclo.CallbackBase):
+    decay: Union[float, Callable[[int], float]] = 0.995
+    update_every: int = 10
+    update_after_step: int = 100
+
+    def __call__(self, state: TrainState, batch, elapsed: Elapsed, loop):
+        if elapsed.steps < self.update_after_step:
+            state = state.replace(ema_params=state.params)
+            return None, state
+        steps = elapsed.steps - self.update_after_step
+        if steps >= 0 and steps % self.update_every == 0:
+            decay = self.decay(elapsed.steps) if callable(self.decay) else self.decay
+            ema_params = ema_update(decay, state.ema_params, state.params)
+            return None, state.replace(ema_params=ema_params)
 
 
-# %%
-state, history, _ = ciclo.loop(
-    state,
-    ds.as_numpy_iterator(),
-    {
-        ciclo.every(1): [train_step],
-        ciclo.every(config.ema.update_every): [ema_update],
-        ciclo.every(config.eval_every): [visualize_samples],
-        ciclo.every(config.log_every): [
-            ciclo.wandb_logger(wandb_run),
-            ciclo.checkpoint(f"logdir/{wandb_run.id}", monitor="ema_loss", mode="min"),
-            reset_metrics,
-        ],
-        ciclo.every(1): [ciclo.keras_bar(total=ciclo.at(steps=config.total_steps))],
-    },
-    on_end=[visualize_samples],
-    stop=ciclo.at(steps=config.total_steps),
-)
+def main():
+    # %%
+    state, history, _ = ciclo.loop(
+        state,
+        ds.as_numpy_iterator(),
+        {
+            ciclo.every(1): [train_step],
+            ciclo.every(config.ema.update_every): [ema_update],
+            ciclo.every(config.eval_every, steps_offset=10): [visualize_data],
+            ciclo.every(config.log_every): [
+                ciclo.wandb_logger(wandb_run),
+                ciclo.checkpoint(
+                    f"logdir/{wandb_run.id}",
+                    monitor="ema_loss",
+                    mode="min",
+                    async_manager=AsyncManager(),
+                ),
+                reset_metrics,
+            ],
+            ciclo.every(1): [
+                ciclo.keras_bar(
+                    total=ciclo.at(steps=config.total_steps), always_stateful=True
+                )
+            ],
+        },
+        on_end=[visualize_data],
+        stop=ciclo.at(steps=config.total_steps),
+    )

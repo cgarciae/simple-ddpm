@@ -1,3 +1,5 @@
+import functools
+from pathlib import Path
 import sys
 from dataclasses import asdict, dataclass
 from typing import (
@@ -30,45 +32,21 @@ from typing_extensions import Protocol
 A = TypeVar("A")
 
 
-class EMA(Generic[A], PyTreeNode):
-    params: A
-    decay_fn: Callable[[jnp.ndarray], jnp.ndarray] = field(pytree_node=False)
+@jax.jit
+def ema_update(decay, ema_params, new_params):
+    def _ema(ema_params, new_params):
+        return decay * ema_params + (1.0 - decay) * new_params
 
-    @classmethod
-    def create(
-        cls,
-        params: A,
-        decay: Union[float, Callable[[jnp.ndarray], jnp.ndarray]],
-    ):
-        if isinstance(decay, (float, int, np.ndarray, jnp.ndarray)):
-            decay_fn = lambda _: jnp.asarray(decay, dtype=jnp.float32)
-        else:
-            decay_fn = decay
-
-        return cls(
-            params=params,
-            decay_fn=decay_fn,
-        )
-
-    def update(self, new_params, step: int) -> "EMA":
-        params = self._ema_update(new_params, step)
-        return self.replace(params=params)
-
-    @jax.jit
-    def _ema_update(self, new_params, step):
-        decay = self.decay_fn(step)
-
-        def _ema(ema_params, new_params):
-            return decay * ema_params + (1.0 - decay) * new_params
-
-        return jax.tree_map(_ema, self.params, new_params)
+    return jax.tree_map(_ema, ema_params, new_params)
 
 
 def parse_config(config_class: Type[A]) -> A:
     config = config_class()
-    config_flag = config_flags.DEFINE_config_dataclass("config", config)
-    flags.FLAGS(sys.argv)
-    return config_flag.value
+    if not get_ipython():
+        config_flag = config_flags.DEFINE_config_dataclass("config", config)
+        flags.FLAGS(sys.argv)
+        config = config_flag.value
+    return config
 
 
 def get_wandb_run(config) -> Run:
@@ -81,6 +59,7 @@ def get_wandb_run(config) -> Run:
         },
         save_code=True,
     )
+    assert run is not None
 
     ignored = parse_gitignore(".gitignore")
 
@@ -97,19 +76,27 @@ def get_wandb_run(config) -> Run:
             return False
 
     run.log_code(include_fn=include_fn)
-
     return run
 
 
 def show(config, name: str, step: int = 0):
     if config.viz == "wandb":
-        wandb.log({name: plt}, step=step)
+        wandb.log({name: wandb.Image(plt)}, step=step)
     elif not get_ipython():
         plt.ion()
         plt.pause(1)
         plt.ioff()
     else:
         plt.show()
+
+
+def print_compiling(f: A) -> A:
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        print(f"Compiling '{f.__name__}' ...")
+        return f(*args, **kwargs)
+
+    return wrapper
 
 
 def render_image(x, ax=None):
