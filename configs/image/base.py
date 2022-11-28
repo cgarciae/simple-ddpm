@@ -26,6 +26,7 @@ class OptimizerConfig:
 
 @dataclass
 class Config:
+    debug: bool = False
     batch_size: int = 32
     epochs: int = 500
     total_samples: int = 5_000_000
@@ -34,7 +35,7 @@ class Config:
     viz: str = "matplotlib"
     model: str = "stable_unet"
     viz_progress_every: int = 2000
-    log_every: int = 50
+    checkpoint_every: int = 50
     ema: EMAConfig = EMAConfig()
     schedule: DiffusionConfig = DiffusionConfig()
     diffusion: DiffusionConfig = DiffusionConfig()

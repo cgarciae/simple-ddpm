@@ -18,7 +18,7 @@
 from dataclasses import dataclass
 from functools import partial
 from time import time
-from typing import Any, Callable, Union
+from typing import Any, Callable, Union, Tuple, Optional
 
 import ciclo
 import flax.linen as nn
@@ -51,6 +51,7 @@ from simple_ddpm.utils import (
     render_image,
     show,
 )
+from ciclo import managed
 
 
 def get_data(config: Config):
@@ -138,8 +139,18 @@ def visualize_schedule(config: Config, process: GaussianDiffusion, x_sample):
     show(config, "betas_schedule")
 
 
+class DebugModule(nn.Module):
+    units: int
+
+    @nn.compact
+    def __call__(self, x, t):
+        return nn.Conv(self.units, (3, 3), padding="SAME")(x)
+
+
 def get_module(config: Config, num_channels: int):
-    if config.model == "stable_unet":
+    if config.debug:
+        return DebugModule(num_channels)
+    elif config.model == "stable_unet":
         config.stable_diffusion_unet.out_channels = num_channels
         return UNet2DModule(config.stable_diffusion_unet)
     elif config.model == "lucid_unet":
@@ -148,20 +159,9 @@ def get_module(config: Config, num_channels: int):
         raise ValueError(f"Unknown model: '{config.model}'")
 
 
-@struct.dataclass
-class Metrics(Collection):
-    loss: Average.from_output("loss")
-    ema_loss: Average.from_output("ema_loss")
-
-    def update(self, *, loss, ema_loss) -> "Metrics":
-        updates = self.single_from_model_output(loss=loss, ema_loss=ema_loss)
-        return self.merge(updates)
-
-
-class TrainState(train_state.TrainState):
+class State(managed.ManagedState):
     key: jax.random.KeyArray
     ema_params: Any
-    metrics: Metrics
     process: GaussianDiffusion
     config: Config = struct.field(pytree_node=False)
     loss_fn: Callable = struct.field(pytree_node=False)
@@ -173,9 +173,9 @@ class TrainState(train_state.TrainState):
         )
 
 
-@jax.jit
-@print_compiling
-def train_step(state: TrainState, x: jax.Array):
+@managed.train_step
+def train_step(state: State, x: jax.Array):
+    print("Compiling train_step...")
     config = state.config
     key_t, key_diffusion, key = jax.random.split(state.key, 3)
     t = jax.random.uniform(
@@ -187,41 +187,59 @@ def train_step(state: TrainState, x: jax.Array):
         noise_hat = state.apply_fn({"params": params}, xt, t)
         return state.loss_fn(noise, noise_hat)
 
-    loss, grads = jax.value_and_grad(loss_fn)(state.params)
+    loss = loss_fn(state.params)
     ema_loss = loss_fn(state.ema_params)
-    state = state.apply_gradients(grads=grads)
-    metrics = state.metrics.update(loss=loss, ema_loss=ema_loss)
-    return None, state.replace(key=key, metrics=metrics)
+
+    # get logs
+    logs = ciclo.logs()
+    logs.add_loss("loss", loss)
+    logs.add_metric("loss", loss)
+    logs.add_metric("ema_loss", ema_loss)
+
+    return logs, state.replace(key=key)
+
+
+@managed.step
+def reverse_sample(
+    state: State, batch: Tuple[jax.Array, jax.Array, jax.random.KeyArray]
+):
+    print("Compiling reverse_sample...")
+    x, t, key = batch
+    key = key[0]
+    t = t[0]
+    process = state.process
+    xf = process.sample(
+        key=key, model_fn=model_forward, state=state, x=x, t=t, return_all=False
+    )
+    logs = ciclo.logs()
+    logs.add_output("samples", xf)
+    return logs
 
 
 @jax.jit
 @print_compiling
-def model_forward(state: TrainState, x: jax.Array, t: jax.Array) -> jax.Array:
+def model_forward(state: State, x: jax.Array, t: jax.Array) -> jax.Array:
     return state.apply_fn({"params": state.ema_params}, x, t)
 
 
-def compute_metrics(state: TrainState):
-    logs = state.metrics.compute()
-    state = state.replace(metrics=Metrics.empty())
-    return logs, state
-
-
-def viz_model_samples(state: TrainState, x: jax.Array, elapsed: Elapsed):
+def viz_model_samples(state: State, x: jax.Array, elapsed: Elapsed):
     print("\nSampling ...")
     config = state.config
-    process = state.process
 
     n_rows = 3
-    n_cols = 6
+    n_cols = 8
+    batch_size = n_rows * n_cols
+    # create inputs
     viz_key = jax.random.PRNGKey(1)
-    x = jax.random.normal(viz_key, (n_rows * n_cols, *x.shape[1:]))
-
+    viz_key = einop(viz_key, "t -> b t", b=batch_size)
     ts = np.arange(config.diffusion.timesteps)[::-1]
-    xf = process.sample(
-        key=viz_key, model_fn=model_forward, state=state, x=x, t=ts, return_all=False
-    )
+    ts = einop(ts, "t -> b t", b=batch_size)
+    x = jax.random.normal(jax.random.PRNGKey(2), (batch_size, *x.shape[1:]))
+
+    logs, _ = reverse_sample(state, (x, ts, viz_key))
+    xf = logs["per_sample_outputs"]["samples"]
     xf = np.asarray(xf)
-    xf = einop(xf, "(row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
+    xf = einop(xf, " (row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 
     plt.figure(figsize=(3 * n_cols, 3 * n_rows))
     render_image(xf)
@@ -229,20 +247,54 @@ def viz_model_samples(state: TrainState, x: jax.Array, elapsed: Elapsed):
 
 
 @dataclass
-class ema_step(ciclo.CallbackBase):
+class ema_step(ciclo.LoopElement):
     decay: Union[float, Callable[[int], float]] = 0.995
     update_every: int = 10
     update_after_step: int = 100
 
-    def __call__(self, state: TrainState, batch, elapsed: Elapsed, loop):
+    def __call__(self, state: State, batch, elapsed: Elapsed) -> Optional[State]:
         if elapsed.steps < self.update_after_step:
             state = state.replace(ema_params=state.params)
-            return None, state
+            return state
         steps = elapsed.steps - self.update_after_step
         if steps >= 0 and steps % self.update_every == 0:
             decay = self.decay(elapsed.steps) if callable(self.decay) else self.decay
             ema_params = ema_update(decay, state.ema_params, state.params)
-            return None, state.replace(ema_params=ema_params)
+            return state.replace(ema_params=ema_params)
+
+
+def create_state(
+    *,
+    config: Config,
+    module: nn.Module,
+    process: GaussianDiffusion,
+    loss_fn,
+    x,
+    strategy: str = "data_parallel",
+) -> State:
+    variables = module.init(jax.random.PRNGKey(42), x[:1], jnp.array([0]))
+    tx = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(
+            optax.piecewise_constant_schedule(
+                config.optimizer.lr_start,
+                {
+                    int(config.total_steps * 1 / 3): config.optimizer.drop_1_mult,
+                    int(config.total_steps * 2 / 3): config.optimizer.drop_2_mult,
+                },
+            )
+        ),
+    )
+    return State.create(
+        apply_fn=module.apply,
+        params=variables["params"],
+        tx=tx,
+        key=jax.random.PRNGKey(0),
+        process=process,
+        config=config,
+        loss_fn=loss_fn,
+        strategy=strategy,
+    )
 
 
 # %%
@@ -253,7 +305,7 @@ def main(_):
     try:
         config: Config = flags.FLAGS.config
     except AttributeError:
-        config = Config()
+        config = Config(debug=True)
 
     # %%
     print(jax.devices())
@@ -303,28 +355,8 @@ def main(_):
     # %%
 
     module = get_module(config, num_channels)
-    variables = module.init(jax.random.PRNGKey(42), x_sample[:1], jnp.array([0]))
-    tx = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adamw(
-            optax.piecewise_constant_schedule(
-                config.optimizer.lr_start,
-                {
-                    int(config.total_steps * 1 / 3): config.optimizer.drop_1_mult,
-                    int(config.total_steps * 2 / 3): config.optimizer.drop_2_mult,
-                },
-            )
-        ),
-    )
-    state: TrainState = TrainState.create(
-        apply_fn=module.apply,
-        params=variables["params"],
-        tx=tx,
-        key=jax.random.PRNGKey(0),
-        metrics=Metrics.empty(),
-        process=process,
-        config=config,
-        loss_fn=loss_fn,
+    state = create_state(
+        config=config, module=module, process=process, loss_fn=loss_fn, x=x_sample
     )
 
     print(
@@ -332,7 +364,7 @@ def main(_):
     )
 
     # %%
-    state, history, _ = ciclo.loop(
+    state, history, elapsed = ciclo.loop(
         state,
         ds.as_numpy_iterator(),
         {
@@ -343,9 +375,7 @@ def main(_):
                 update_after_step=config.ema.update_after_step,
             ),
             ciclo.every(config.viz_progress_every, steps_offset=1): viz_model_samples,
-            ciclo.every(config.log_every, steps_offset=1): [
-                compute_metrics,
-                ciclo.wandb_logger(wandb_run) if config.viz == "wandb" else ciclo.noop,
+            ciclo.every(config.checkpoint_every, steps_offset=1): [
                 ciclo.checkpoint(
                     f"logdir/{run_id}",
                     monitor="ema_loss",
@@ -353,6 +383,7 @@ def main(_):
                     async_manager=AsyncManager(),
                 ),
             ],
+            **(ciclo.wandb_logger(wandb_run) if wandb_run is not None else ciclo.noop),
             **ciclo.keras_bar(
                 total=ciclo.at(steps=config.total_steps),
                 always_stateful=True,
@@ -369,7 +400,7 @@ def main(_):
     # ------------------
     # loss
     plt.figure()
-    steps, ema_loss, loss = history["steps", "ema_loss", "loss"]
+    steps, ema_loss, loss = history.collect("steps", "ema_loss", "metrics.loss")
     ema_loss = np.asarray(ema_loss)
     plt.plot(steps, ema_loss, label="ema_loss")
     plt.plot(steps, loss, label="loss")
