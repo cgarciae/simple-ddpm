@@ -168,8 +168,13 @@ class State(managed.ManagedState):
 
     @classmethod
     def create(cls, *, apply_fn, params, tx, **kwargs):
+        ema_params = jax.tree_map(jnp.copy, params)
         return super().create(
-            apply_fn=apply_fn, params=params, tx=tx, ema_params=params, **kwargs
+            apply_fn=apply_fn,
+            params=params,
+            tx=tx,
+            ema_params=ema_params,
+            **kwargs,
         )
 
 
@@ -177,11 +182,11 @@ class State(managed.ManagedState):
 def train_step(state: State, x: jax.Array):
     print("Compiling train_step...")
     config = state.config
-    key_t, key_diffusion, key = jax.random.split(state.key, 3)
+    key = jax.random.fold_in(state.key, state.step)
     t = jax.random.uniform(
-        key_t, (x.shape[0],), minval=0, maxval=config.diffusion.timesteps - 1
+        key, (x.shape[0],), minval=0, maxval=config.diffusion.timesteps - 1
     ).astype(jnp.int32)
-    xt, noise = state.process.forward(key=key_diffusion, x=x, t=t)
+    xt, noise = state.process.forward(key=key, x=x, t=t)
 
     def loss_fn(params):
         noise_hat = state.apply_fn({"params": params}, xt, t)
@@ -196,7 +201,7 @@ def train_step(state: State, x: jax.Array):
     logs.add_metric("loss", loss)
     logs.add_metric("ema_loss", ema_loss)
 
-    return logs, state.replace(key=key)
+    return logs
 
 
 @managed.step
@@ -216,8 +221,6 @@ def reverse_sample(
     return logs
 
 
-@jax.jit
-@print_compiling
 def model_forward(state: State, x: jax.Array, t: jax.Array) -> jax.Array:
     return state.apply_fn({"params": state.ema_params}, x, t)
 
@@ -236,7 +239,7 @@ def viz_model_samples(state: State, x: jax.Array, elapsed: Elapsed):
     ts = einop(ts, "t -> b t", b=batch_size)
     x = jax.random.normal(jax.random.PRNGKey(2), (batch_size, *x.shape[1:]))
 
-    logs, _ = reverse_sample(state, (x, ts, viz_key))
+    logs, state = reverse_sample(state, (x, ts, viz_key))
     xf = logs["per_sample_outputs"]["samples"]
     xf = np.asarray(xf)
     xf = einop(xf, " (row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
@@ -245,6 +248,22 @@ def viz_model_samples(state: State, x: jax.Array, elapsed: Elapsed):
     render_image(xf)
     show(config, "training_samples", step=elapsed.steps)
 
+    return state
+
+
+@managed.step
+def ema_update_step(state: State, _, decay):
+    print("Compiling ema_update_step...")
+    ema_params = ema_update(decay, state.ema_params, state.params)
+    return state.replace(ema_params=ema_params)
+
+
+@managed.step
+def ema_copy_step(state: State):
+    print("Compiling ema_copy_step...")
+    ema_params = jax.tree_map(jnp.copy, state.params)
+    return state.replace(ema_params=ema_params)
+
 
 @dataclass
 class ema_step(ciclo.LoopElement):
@@ -252,15 +271,13 @@ class ema_step(ciclo.LoopElement):
     update_every: int = 10
     update_after_step: int = 100
 
-    def __call__(self, state: State, batch, elapsed: Elapsed) -> Optional[State]:
+    def __call__(self, state: State, _, elapsed: Elapsed):
         if elapsed.steps < self.update_after_step:
-            state = state.replace(ema_params=state.params)
-            return state
+            return ema_copy_step(state)
         steps = elapsed.steps - self.update_after_step
         if steps >= 0 and steps % self.update_every == 0:
             decay = self.decay(elapsed.steps) if callable(self.decay) else self.decay
-            ema_params = ema_update(decay, state.ema_params, state.params)
-            return state.replace(ema_params=ema_params)
+            return ema_update_step(state, None, decay)
 
 
 def create_state(
@@ -270,7 +287,7 @@ def create_state(
     process: GaussianDiffusion,
     loss_fn,
     x,
-    strategy: str = "data_parallel",
+    strategy: str = "data_parallel_donate",
 ) -> State:
     variables = module.init(jax.random.PRNGKey(42), x[:1], jnp.array([0]))
     tx = optax.chain(
@@ -295,6 +312,17 @@ def create_state(
         loss_fn=loss_fn,
         strategy=strategy,
     )
+
+
+def create_checkpoint(*args, **kwargs):
+    checkpoint = ciclo.checkpoint(*args, **kwargs)
+
+    def checkpoint_fn(state: State, batch, elapsed, loop: ciclo.LoopState):
+        logs = loop.logs
+        state = state.with_strategy("eager")
+        checkpoint(elapsed, state, logs)
+
+    return checkpoint_fn
 
 
 # %%
@@ -376,7 +404,7 @@ def main(_):
             ),
             ciclo.every(config.viz_progress_every, steps_offset=1): viz_model_samples,
             ciclo.every(config.checkpoint_every, steps_offset=1): [
-                ciclo.checkpoint(
+                create_checkpoint(
                     f"logdir/{run_id}",
                     monitor="ema_loss",
                     mode="min",

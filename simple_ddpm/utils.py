@@ -32,7 +32,6 @@ from typing_extensions import Protocol
 A = TypeVar("A")
 
 
-@jax.jit
 def ema_update(decay, ema_params, new_params):
     def _ema(ema_params, new_params):
         return decay * ema_params + (1.0 - decay) * new_params
