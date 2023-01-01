@@ -18,7 +18,7 @@
 from dataclasses import dataclass
 from functools import partial
 from time import time
-from typing import Any, Callable, Union, Tuple, Optional
+from typing import Any, Callable, Optional, Tuple, Union
 
 import ciclo
 import flax.linen as nn
@@ -28,17 +28,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import optax
 import tensorflow as tf
-import wandb
 from absl import app, flags, logging
-from ciclo import Elapsed, LoopState
+from ciclo import Elapsed, LoopState, managed
 from clu.metrics import Average, Collection
-from configs.image.base import Config
 from datasets.load import load_dataset
 from einop import einop
 from flax import struct
 from flax.training import train_state
 from flax.training.checkpoints import AsyncManager
+from jax_smi import initialise_tracking
 from ml_collections import config_flags
+
+import wandb
+from configs.image.base import Config
 from simple_ddpm import schedules
 from simple_ddpm.models.unet_lucid import UNet
 from simple_ddpm.models.unet_stable import UNet2DConfig, UNet2DModule
@@ -51,7 +53,6 @@ from simple_ddpm.utils import (
     render_image,
     show,
 )
-from ciclo import managed
 
 
 def get_data(config: Config):
@@ -240,7 +241,7 @@ def viz_model_samples(state: State, x: jax.Array, elapsed: Elapsed):
     x = jax.random.normal(jax.random.PRNGKey(2), (batch_size, *x.shape[1:]))
 
     logs, state = reverse_sample(state, (x, ts, viz_key))
-    xf = logs["per_sample_outputs"]["samples"]
+    xf = logs["outputs"]["samples"]
     xf = np.asarray(xf)
     xf = einop(xf, " (row col) h w c -> (row h) (col w) c", row=n_rows, col=n_cols)
 
@@ -329,6 +330,7 @@ def create_checkpoint(*args, **kwargs):
 
 
 def main(_):
+    initialise_tracking()
     # %%
     try:
         config: Config = flags.FLAGS.config
